@@ -1,4 +1,14 @@
 services:
+  arm-mock:
+    profiles: [arm-mock]
+    image: python:3.10-slim
+    network_mode: none
+    working_dir: /work
+    volumes:
+      - .:/work:ro
+    init: true
+    command: ["python", "-B", "-m", "unittest", "discover", "-s", "tests", "-v"]
+
   arm-sim:
     profiles: [arm-sim]
     build:
