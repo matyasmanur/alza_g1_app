@@ -129,7 +129,7 @@ class ControllerTests(unittest.TestCase):
     def test_stop_latches_and_discards_gesture_without_return(self):
         self.enable()
         self.controller.start_gesture("operator", (self.pose(0.8), self.pose(0.0)))
-        self.advance(30)
+        self.advance(50)
         self.controller.stop("operator")
         self.assertEqual(self.controller.status.motion, Motion.STOPPING)
         self.assertTrue(self.controller.status.stop_latched)

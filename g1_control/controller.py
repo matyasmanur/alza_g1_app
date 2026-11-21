@@ -3,12 +3,13 @@
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from math import copysign, sqrt
+from math import copysign, isfinite, sqrt
 from time import monotonic
 from typing import Callable
 
 from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, MAX_ACCELERATION, MAX_SPEED, TARGET_MARGIN
 from g1_control.protocol import COMMAND_PERIOD, COMMAND_TIMEOUT
+from g1_control.trajectory import Clearance, Keyframe, PlanRequest, Segment, UnsafePath, path_issue, plan
 from g1_control.transport import Angles, ArmTransport, Feedback
 
 OPERATOR_TIMEOUT = 1.0
@@ -20,6 +21,7 @@ ZERO = (0.0,) * len(JOINT_NAMES)
 class Motion(str, Enum):
     IDLE = "idle"
     MANUAL = "manual"
+    PLANNING = "planning"
     GESTURE = "gesture"
     STOPPING = "stopping"
 
@@ -40,6 +42,7 @@ class Status:
     measured: Feedback | None
     target: Angles | None
     fault: str | None
+    gesture: str | None
 
 
 def checked_target(joint: str, angle: float) -> float:
@@ -55,7 +58,8 @@ def checked_target(joint: str, angle: float) -> float:
 class MotionController:
     """Own the motion state and write at most one setpoint per tick."""
 
-    def __init__(self, transport: ArmTransport, clock: Callable[[], float] = monotonic) -> None:
+    def __init__(self, transport: ArmTransport, clock: Callable[[], float] = monotonic, *,
+                 clearance: Clearance | None = None) -> None:
         self._transport = transport
         self._clock = clock
         self._last_tick = clock()
@@ -68,7 +72,11 @@ class MotionController:
         self._target: Angles | None = None
         self._position = ZERO
         self._velocity = ZERO
-        self._waypoints: deque[Angles] = deque()
+        self._clearance = clearance
+        self._plan: PlanRequest | None = None
+        self._segments: deque[Segment] = deque()
+        self._segment_elapsed = 0.0
+        self._gesture: str | None = None
         self._fault: str | None = None
 
     @property
@@ -79,7 +87,7 @@ class MotionController:
             connection = "connected" if self._fresh(self._clock()) else "stale"
         return Status(
             connection, self._owner, self._enabled, self._stop_latched,
-            self._motion, self._feedback, self._target, self._fault,
+            self._motion, self._feedback, self._target, self._fault, self._gesture,
         )
 
     def take_control(self, session: str) -> None:
@@ -114,6 +122,8 @@ class MotionController:
             raise Rejected("Wait until the arms settle before enabling")
         if any(not low <= q <= high for q, (low, high) in zip(feedback.position, JOINT_LIMITS.values())):
             raise Rejected("Measured pose is outside the joint limits")
+        if self._clearance is not None and (issue := self._clearance(feedback.position, feedback.lower_position)):
+            raise Rejected(issue)
         self._position = self._target = feedback.position
         self._velocity = ZERO
         self._fault = None
@@ -122,27 +132,70 @@ class MotionController:
     def set_joint(self, session: str, joint: str, angle: float) -> None:
         """Replace the latest manual target for one joint."""
         self._require_enabled(session)
-        if self._motion is Motion.GESTURE:
-            raise Rejected("A gesture is already running")
+        if self._motion in (Motion.PLANNING, Motion.GESTURE):
+            raise Rejected("A gesture is already in progress")
         target = list(self._target)
         value = checked_target(joint, angle)
         target[JOINT_NAMES.index(joint)] = value
-        self._target = tuple(target)
+        goal = tuple(target)
+        if self._clearance is not None:
+            for start in (self._feedback.position, self._position):
+                if issue := path_issue(self._clearance, start, goal, self._feedback.lower_position):
+                    raise Rejected(issue)
+        self._target = goal
         self._motion = Motion.MANUAL
 
     def start_gesture(self, session: str, waypoints: tuple[Angles, ...]) -> None:
-        """Reserve motion for a sequence of complete arm poses."""
+        """Plan and start a sequence synchronously for non-web callers."""
+        request = self.prepare_gesture(session, "Gesture", tuple(Keyframe(pose, 0.35) for pose in waypoints))
+        try:
+            segments = self.plan_gesture(request)
+        except UnsafePath as error:
+            self.finish_plan(session, request, ())
+            raise Rejected(str(error)) from error
+        self.finish_plan(session, request, segments)
+
+    def prepare_gesture(self, session: str, name: str, frames: tuple[Keyframe, ...]) -> PlanRequest:
+        """Reserve motion and capture a stationary pose before planning."""
         self._require_enabled(session)
         if self._motion is not Motion.IDLE:
             raise Rejected("Wait for the current motion to settle")
-        if not waypoints or any(len(pose) != len(JOINT_NAMES) for pose in waypoints):
-            raise Rejected("A gesture needs one or more complete arm poses")
-        checked = deque(
-            tuple(checked_target(joint, q) for joint, q in zip(JOINT_NAMES, pose))
-            for pose in waypoints
+        if (not frames or any(len(frame.pose) != len(JOINT_NAMES)
+                              or not isfinite(frame.seconds) or frame.seconds <= 0 for frame in frames)):
+            raise Rejected("A gesture needs timed, complete arm poses")
+        if any(abs(v) > VELOCITY_TOLERANCE for v in self._feedback.velocity):
+            raise Rejected("Wait for the current motion to settle")
+        checked = tuple(
+            Keyframe(tuple(checked_target(joint, q) for joint, q in zip(JOINT_NAMES, frame.pose)), frame.seconds)
+            for frame in frames
         )
-        self._target = checked.popleft()
-        self._waypoints = checked
+        self._plan = PlanRequest(name, self._feedback, self._position, checked)
+        self._gesture = name
+        self._motion = Motion.PLANNING
+        return self._plan
+
+    def plan_gesture(self, request: PlanRequest) -> tuple[Segment, ...]:
+        """Plan against an immutable snapshot. Safe to run off the control loop."""
+        return plan(request, self._clearance)
+
+    def finish_plan(self, session: str, request: PlanRequest, segments: tuple[Segment, ...]) -> None:
+        """Accept a plan only if the same operator and pose are still current."""
+        if self._plan is not request:
+            raise Rejected("Gesture planning was cancelled")
+        self._plan = None
+        self._motion = Motion.IDLE
+        self._gesture = None
+        self._require_enabled(session)
+        if not segments:
+            return
+        before = request.feedback.lower_position + request.feedback.position
+        now = self._feedback.lower_position + self._feedback.position
+        if max(abs(a - b) for a, b in zip(before, now)) > 0.035:
+            raise Rejected("The measured pose changed during planning. Try again after it settles.")
+        self._segments = deque(segments)
+        self._segment_elapsed = 0.0
+        self._target = segments[0].end
+        self._gesture = request.name
         self._motion = Motion.GESTURE
 
     def stop(self, session: str) -> None:
@@ -183,10 +236,24 @@ class MotionController:
             self._disarm_fault("Control loop missed the command timeout")
             return
 
-        self._advance(min(COMMAND_PERIOD, interval))
+        elapsed = min(COMMAND_PERIOD, interval)
+        if self._segments:
+            self._play(elapsed)
+        else:
+            self._advance(elapsed)
         if any(not low <= q <= high for q, (low, high) in zip(self._position, JOINT_LIMITS.values())):
             self._disarm_fault("Generated setpoint exceeded the joint limits")
             return
+        if self._clearance is not None and self._motion in (Motion.MANUAL, Motion.GESTURE, Motion.STOPPING):
+            for pose in (self._feedback.position, self._position):
+                if issue := self._clearance(pose, self._feedback.lower_position):
+                    try:
+                        self._transport.write(self._feedback.position, ZERO, enabled=False)
+                    except OSError:
+                        pass  # The simulator watchdog remains the fallback.
+                    self._stop_latched = True
+                    self._disarm_fault(issue)
+                    return
         releasing = self._motion is Motion.STOPPING and self._velocity == ZERO
         try:
             self._transport.write(self._position, self._velocity, enabled=not releasing)
@@ -195,11 +262,9 @@ class MotionController:
             return
         if releasing:
             self._motion = Motion.IDLE
-        elif self._target is not None and self._settled():
-            if self._waypoints:
-                self._target = self._waypoints.popleft()
-            else:
-                self._motion = Motion.IDLE
+        elif self._motion in (Motion.MANUAL, Motion.GESTURE) and not self._segments and self._settled():
+            self._motion = Motion.IDLE
+            self._gesture = None
 
     def _fresh(self, now: float) -> bool:
         return self._feedback is not None and now - self._feedback.received_at < COMMAND_TIMEOUT
@@ -218,7 +283,9 @@ class MotionController:
             self._motion = Motion.STOPPING
         self._enabled = False
         self._target = None
-        self._waypoints.clear()
+        self._plan = None
+        self._segments.clear()
+        self._gesture = None
 
     def _disarm_fault(self, reason: str) -> None:
         self._cancel_motion()
@@ -241,6 +308,15 @@ class MotionController:
             velocities.append(speed)
         self._position = tuple(positions)
         self._velocity = tuple(velocities)
+
+    def _play(self, elapsed: float) -> None:
+        segment = self._segments[0]
+        self._target = segment.end
+        self._segment_elapsed += elapsed
+        self._position, self._velocity = segment.sample(self._segment_elapsed)
+        if self._segment_elapsed >= segment.seconds:
+            self._segments.popleft()
+            self._segment_elapsed = 0.0
 
     def _settled(self) -> bool:
         feedback = self._feedback

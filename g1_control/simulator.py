@@ -59,8 +59,8 @@ def load_supported_model(path: Path) -> mujoco.MjModel:
     return model
 
 
-class ArmSimulator:
-    """Translate arm packets into simulated torques and publish measured state."""
+class ArmPlant:
+    """Advance the same supported G1 physics with live or deterministic inputs."""
 
     def __init__(self, model: mujoco.MjModel) -> None:
         self.model = model
@@ -71,6 +71,41 @@ class ArmSimulator:
         self.arm_limits = model.jnt_range[joint_ids[ARMS]]
         self.hold = self.data.qpos[self.position_indices].copy()
         self.active = False
+
+    def step(self, now: float, command) -> None:
+        """Apply a fresh arm target or capture a hold when the writer goes silent."""
+        positions = self.data.qpos[self.position_indices]
+        velocities = self.data.qvel[self.velocity_indices]
+
+        fresh = command is not None and now - command[0] < COMMAND_TIMEOUT
+        active = fresh and command[1] > 0
+        if self.active and not active:
+            self.hold[ARMS] = positions[ARMS]
+            print("Arm authority released" if fresh else "Arm command timeout. Holding measured pose.")
+        self.active = active
+
+        # The supported waist and legs keep their initial posture independently.
+        torque = 30 * (self.hold - positions) - 3 * velocities
+        torque += self.data.qfrc_bias[self.velocity_indices]
+        if active:
+            _, weight, values = command
+            target, velocity, kp, kd, feedforward = values.T
+            target = np.clip(target, self.arm_limits[:, 0], self.arm_limits[:, 1])
+            user_torque = feedforward + kp * (target - positions[ARMS])
+            user_torque += kd * (velocity - velocities[ARMS])
+            torque[ARMS] = (1 - weight) * torque[ARMS] + weight * user_torque
+
+        self.data.ctrl[:] = np.clip(
+            torque, self.model.actuator_ctrlrange[:, 0], self.model.actuator_ctrlrange[:, 1]
+        )
+        mujoco.mj_step(self.model, self.data)
+
+
+class ArmSimulator:
+    """Exchange arm commands and measured joint state through Unitree DDS."""
+
+    def __init__(self, model: mujoco.MjModel) -> None:
+        self.plant = ArmPlant(model)
         self.lock = Lock()
         self.latest = None
         self.state = unitree_hg_msg_dds__LowState_()
@@ -98,54 +133,27 @@ class ArmSimulator:
         with self.lock:
             self.latest = (received_at, weight, values)
 
-    def step(self, now: float) -> None:
-        """Apply a fresh arm target or capture a hold when the writer goes silent."""
-        positions = self.data.qpos[self.position_indices]
-        velocities = self.data.qvel[self.velocity_indices]
-        with self.lock:
-            command = self.latest
-
-        fresh = command is not None and now - command[0] < COMMAND_TIMEOUT
-        active = fresh and command[1] > 0
-        if self.active and not active:
-            self.hold[ARMS] = positions[ARMS]
-            print("Arm authority released" if fresh else "Arm command timeout. Holding measured pose.")
-        self.active = active
-
-        # The supported waist and legs keep their initial posture independently.
-        torque = 30 * (self.hold - positions) - 3 * velocities
-        torque += self.data.qfrc_bias[self.velocity_indices]
-        if active:
-            _, weight, values = command
-            target, velocity, kp, kd, feedforward = values.T
-            target = np.clip(target, self.arm_limits[:, 0], self.arm_limits[:, 1])
-            user_torque = feedforward + kp * (target - positions[ARMS])
-            user_torque += kd * (velocity - velocities[ARMS])
-            torque[ARMS] = (1 - weight) * torque[ARMS] + weight * user_torque
-
-        self.data.ctrl[:] = np.clip(
-            torque, self.model.actuator_ctrlrange[:, 0], self.model.actuator_ctrlrange[:, 1]
-        )
-        mujoco.mj_step(self.model, self.data)
-
     def publish_state(self) -> None:
         """Publish MuJoCo measurements in Unitree motor order."""
-        for index, (q_index, dq_index) in enumerate(zip(self.position_indices, self.velocity_indices)):
+        plant = self.plant
+        for index, (q_index, dq_index) in enumerate(zip(plant.position_indices, plant.velocity_indices)):
             state = self.state.motor_state[index]
-            state.q = float(self.data.qpos[q_index])
-            state.dq = float(self.data.qvel[dq_index])
-        self.state.tick = round(self.data.time * 1000) % (2**32)
+            state.q = float(plant.data.qpos[q_index])
+            state.dq = float(plant.data.qvel[dq_index])
+        self.state.tick = round(plant.data.time * 1000) % (2**32)
         self.state.crc = self.crc.Crc(self.state)
         self.publisher.Write(self.state)
 
     def run(self) -> None:
         """Advance physics at the model timestep and publish at 50 Hz."""
         deadline = next_state = monotonic()
-        step_period = self.model.opt.timestep
+        step_period = self.plant.model.opt.timestep
         print(f"Supported G1 ready on {INTERFACE}, DDS domain {DOMAIN_ID}")
         while True:
             now = monotonic()
-            self.step(now)
+            with self.lock:
+                command = self.latest
+            self.plant.step(now, command)
             if now >= next_state:
                 self.publish_state()
                 next_state = now + COMMAND_PERIOD

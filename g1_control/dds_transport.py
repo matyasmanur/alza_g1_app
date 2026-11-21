@@ -14,6 +14,8 @@ from g1_control.protocol import (
 )
 from g1_control.transport import Angles, Feedback
 
+ARM_GAINS = tuple((8.0, 1.0) if "wrist" in joint else (45.0, 4.0) for joint in JOINT_NAMES)
+
 
 class DdsTransport:
     """Keep DDS callbacks confined to immutable telemetry snapshots."""
@@ -25,9 +27,9 @@ class DdsTransport:
         self._last_tick: int | None = None
         self._command = unitree_hg_msg_dds__LowCmd_()
         self._command.mode_machine = MODE_MACHINE
-        for index, joint in enumerate(JOINT_NAMES, start=ARM_START):
+        for index, gains in enumerate(ARM_GAINS, start=ARM_START):
             motor = self._command.motor_cmd[index]
-            motor.kp, motor.kd = (8.0, 1.0) if "wrist" in joint else (45.0, 4.0)
+            motor.kp, motor.kd = gains
         self._publisher = ChannelPublisher(ARM_TOPIC, LowCmd_)
         self._publisher.Init()
         self._subscriber = ChannelSubscriber(STATE_TOPIC, LowState_)
