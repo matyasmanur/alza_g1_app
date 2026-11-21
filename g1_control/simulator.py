@@ -22,6 +22,7 @@ from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowState_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
 from unitree_sdk2py.utils.crc import CRC
 
+from g1_control.joints import JOINT_LIMITS, JOINT_NAMES
 from g1_control.protocol import (
     ARM_END,
     ARM_START,
@@ -31,7 +32,6 @@ from g1_control.protocol import (
     COMMAND_TIMEOUT,
     DOMAIN_ID,
     INTERFACE,
-    LEFT_ELBOW,
     MODE_MACHINE,
     STATE_TOPIC,
 )
@@ -50,8 +50,12 @@ def load_supported_model(path: Path) -> mujoco.MjModel:
         constraints = ElementTree.SubElement(root, "equality")
     ElementTree.SubElement(constraints, "weld", name="support_stand", body1="pelvis")
     model = mujoco.MjModel.from_xml_string(ElementTree.tostring(root, encoding="unicode"))
-    if model.nu != ARM_END or model.actuator(LEFT_ELBOW).name != "left_elbow":
+    if model.nu != ARM_END:
         raise ValueError("The scene does not match the 29-DoF G1 DDS actuator order")
+    arm_names = tuple(model.actuator(index).name for index in range(ARM_START, ARM_END))
+    arm_joint_ids = model.actuator_trnid[ARMS, 0]
+    if arm_names != JOINT_NAMES or not np.array_equal(model.jnt_range[arm_joint_ids], list(JOINT_LIMITS.values())):
+        raise ValueError("The scene does not match the configured G1 arm names and joint limits")
     return model
 
 

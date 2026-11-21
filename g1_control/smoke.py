@@ -1,5 +1,6 @@
 """Verify official arm DDS commands and measured feedback in one Docker run."""
 
+import argparse
 import subprocess
 import sys
 from tempfile import TemporaryFile
@@ -94,8 +95,56 @@ def check_arm_motion() -> None:
     print(f"Measured left elbow movement: {change:+.3f} rad for a {increment:+.2f} rad target")
 
 
+def check_controller_motion() -> None:
+    """Verify controller-owned motion and Stop via the DDS transport."""
+    from g1_control.controller import Motion, MotionController
+    from g1_control.dds_transport import DdsTransport
+    from g1_control.joints import JOINT_NAMES
+
+    controller = MotionController(DdsTransport())
+    operator = "smoke-operator"
+    elbow = JOINT_NAMES.index("left_elbow")
+    deadline = monotonic() + 10
+    while controller.status.connection != "connected" and monotonic() < deadline:
+        controller.tick()
+        sleep(COMMAND_PERIOD)
+    if controller.status.connection != "connected":
+        raise RuntimeError("No fresh G1 feedback for the controller")
+
+    baseline = controller.status.measured.position[elbow]
+    controller.take_control(operator)
+    controller.enable(operator)
+    controller.set_joint(operator, "left_elbow", baseline + 0.80)
+    deadline = monotonic() + 0.9
+    while monotonic() < deadline:
+        controller.heartbeat(operator)
+        controller.tick()
+        sleep(COMMAND_PERIOD)
+    moving = controller.status.measured.position[elbow] - baseline
+    if controller.status.motion is not Motion.MANUAL or not 0.12 < moving < 0.65:
+        raise RuntimeError(f"Expected elbow in motion before Stop, measured {moving:+.3f} rad")
+
+    controller.stop(operator)
+    deadline = monotonic() + 0.6
+    while monotonic() < deadline:
+        controller.heartbeat(operator)
+        controller.tick()
+        sleep(COMMAND_PERIOD)
+    stopped = controller.status
+    change = stopped.measured.position[elbow] - baseline
+    if (stopped.connection != "connected" or stopped.motion is not Motion.IDLE
+            or not stopped.stop_latched or stopped.enabled or stopped.fault
+            or not 0.12 < change < 0.70 or abs(stopped.measured.velocity[elbow]) > 0.10):
+        raise RuntimeError(f"Expected a settled, latched Stop, measured {change:+.3f} rad, {stopped}")
+    print(f"Elbow displacement at Stop request: {moving:+.3f} rad")
+    print(f"Elbow displacement after Stop: {change:+.3f} rad for a +0.80 rad target")
+
+
 def main() -> None:
-    """Run the simulator as a separate process and check its timeout log."""
+    """Run an SDK smoke check alongside a separate simulator process."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--controller", action="store_true", help="Exercise the controller and DDS transport")
+    use_controller = parser.parse_args().controller
     with TemporaryFile(mode="w+") as log:
         simulator = subprocess.Popen(
             [sys.executable, "-m", "g1_control.simulator"],
@@ -103,16 +152,24 @@ def main() -> None:
             stderr=subprocess.STDOUT,
         )
         try:
-            check_arm_motion()
+            if use_controller:
+                check_controller_motion()
+            else:
+                check_arm_motion()
         finally:
             simulator.terminate()
             simulator.wait(timeout=5)
             log.seek(0)
             output = log.read()
             print(output, end="")
-        if "Arm command timeout" not in output:
-            raise RuntimeError("The simulator did not enter its timeout hold")
-    print("PASS: rt/arm_sdk motion, rt/lowstate feedback, and simulator command timeout")
+        if use_controller:
+            if "Arm authority released" not in output or "Arm command timeout" in output:
+                raise RuntimeError("Expected explicit controller handoff to the simulator hold")
+            print("PASS: controller motion, measured feedback, and Stop handoff")
+        else:
+            if "Arm command timeout" not in output:
+                raise RuntimeError("The simulator did not enter its timeout hold")
+            print("PASS: rt/arm_sdk motion, rt/lowstate feedback, and simulator command timeout")
 
 
 if __name__ == "__main__":
