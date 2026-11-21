@@ -1,4 +1,19 @@
 services:
+  arm-sim:
+    profiles: [arm-sim]
+    build:
+      context: .
+      dockerfile: Dockerfile.arm-sim
+      args:
+        UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
+    image: unitree-g1:arm-sim
+    platform: linux/arm64
+    network_mode: none
+    volumes:
+      - .:/work:ro
+    init: true
+    command: ["python", "-m", "g1_control.simulator"]
+
   unitree:
     build:
       context: .

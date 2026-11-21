@@ -1,0 +1,33 @@
+FROM ubuntu:22.04
+
+ARG UNITREE_MUJOCO_VERSION=1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d
+ARG UNITREE_PYTHON_VERSION=814556d15970dd2ecf1c9984e845ca02ab07e206
+ENV PATH=/opt/venv/bin:$PATH \
+    CYCLONEDDS_HOME=/opt/cyclonedds \
+    LD_LIBRARY_PATH=/opt/cyclonedds/lib \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates cmake git libgl1 libglib2.0-0 \
+    python3-dev python3-venv && rm -rf /var/lib/apt/lists/*
+
+# Cyclone DDS 0.10.2 has no Linux ARM64 wheel on PyPI.
+RUN git clone --depth 1 --branch 0.10.2 https://github.com/eclipse-cyclonedds/cyclonedds.git /tmp/cyclonedds \
+    && cmake -S /tmp/cyclonedds -B /tmp/cyclonedds/build \
+       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$CYCLONEDDS_HOME" \
+       -DENABLE_SHM=OFF -DENABLE_SSL=OFF -DBUILD_TESTING=OFF \
+    && cmake --build /tmp/cyclonedds/build --target install -j4 \
+    && rm -rf /tmp/cyclonedds
+
+RUN git init /opt/unitree_sdk2_python \
+    && git -C /opt/unitree_sdk2_python fetch --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python.git "$UNITREE_PYTHON_VERSION" \
+    && git -C /opt/unitree_sdk2_python checkout --detach FETCH_HEAD \
+    && python3 -m venv /opt/venv \
+    && pip install --no-cache-dir -e /opt/unitree_sdk2_python mujoco==3.3.6
+
+RUN git init /opt/unitree_mujoco \
+    && git -C /opt/unitree_mujoco fetch --depth 1 https://github.com/unitreerobotics/unitree_mujoco.git "$UNITREE_MUJOCO_VERSION" \
+    && git -C /opt/unitree_mujoco checkout --detach FETCH_HEAD
+
+WORKDIR /work
