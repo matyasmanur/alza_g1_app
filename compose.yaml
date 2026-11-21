@@ -25,6 +25,8 @@ services:
         UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
     platform: linux/arm64
     ports: ["127.0.0.1:8001:8000"]
+    environment:
+      G1_MEASURE_LATENCY: ${G1_MEASURE_LATENCY:-0}
     volumes: [".:/work:ro"]
     init: true
     command: ["python", "-B", "-m", "g1_control.web", "--backend", "sim"]

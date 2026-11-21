@@ -9,6 +9,7 @@ from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
 from unitree_sdk2py.utils.crc import CRC
 
 from g1_control.joints import JOINT_NAMES
+from g1_control.latency import LatencyTrace
 from g1_control.protocol import (
     ARM_END, ARM_START, ARM_TOPIC, ARM_WEIGHT, DOMAIN_ID, INTERFACE, MODE_MACHINE, STATE_TOPIC,
 )
@@ -20,11 +21,12 @@ ARM_GAINS = tuple((8.0, 1.0) if "wrist" in joint else (45.0, 4.0) for joint in J
 class DdsTransport:
     """Keep DDS callbacks confined to immutable telemetry snapshots."""
 
-    def __init__(self) -> None:
+    def __init__(self, trace: LatencyTrace | None = None) -> None:
         ChannelFactoryInitialize(DOMAIN_ID, INTERFACE)
         self._crc = CRC()
         self._latest: Feedback | None = None
         self._last_tick: int | None = None
+        self._trace = trace
         self._command = unitree_hg_msg_dds__LowCmd_()
         self._command.mode_machine = MODE_MACHINE
         for index, gains in enumerate(ARM_GAINS, start=ARM_START):
@@ -47,6 +49,8 @@ class DdsTransport:
         if all(map(isfinite, lower_position + position + velocity)):
             self._last_tick = message.tick
             self._latest = Feedback(monotonic(), position, velocity, lower_position)
+            if self._trace is not None:
+                self._trace.observe(self._latest)
 
     def read(self) -> Feedback | None:
         """Return the most recent valid, advancing G1 arm sample."""
@@ -62,3 +66,5 @@ class DdsTransport:
         command.crc = self._crc.Crc(command)
         if not self._publisher.Write(command):
             raise OSError("Unitree arm command write failed")
+        if self._trace is not None:
+            self._trace.written(position, enabled)

@@ -3,10 +3,12 @@
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 import uvicorn
@@ -14,9 +16,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from g1_control.controller import MotionController, Rejected
+from g1_control.controller import Motion, MotionController, Rejected
 from g1_control.gestures import GESTURES
-from g1_control.joints import JOINT_LIMITS, TARGET_MARGIN
+from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, TARGET_MARGIN
+from g1_control.latency import LatencyTrace
 from g1_control.protocol import COMMAND_PERIOD
 from g1_control.trajectory import PlanRequest, UnsafePath
 
@@ -47,11 +50,18 @@ def state_for(controller: MotionController, session: str) -> dict:
     }
 
 
-def handle_command(controller: MotionController, session: str, raw: str,
-                   plans: dict[asyncio.Task, tuple[int, PlanRequest]]) -> dict | None:
+async def receive_command(socket: WebSocket) -> tuple[str, float]:
+    """Capture receipt before queuing or validating the command."""
+    raw = await socket.receive_text()
+    return raw, monotonic()
+
+
+def handle_command(controller: MotionController, session: str, message: tuple[str, float],
+                   plans: dict[asyncio.Task, tuple[int, PlanRequest]], trace: LatencyTrace | None) -> dict | None:
     """Apply one browser command and acknowledge it. Successful heartbeats are silent."""
     command_id = None
     try:
+        raw, received_at = message
         command = json.loads(raw)
         if not isinstance(command, dict) or not isinstance(command.get("type"), str):
             raise Rejected("Invalid command")
@@ -68,13 +78,23 @@ def handle_command(controller: MotionController, session: str, raw: str,
                 raise Rejected("Unknown gesture")
             gesture = GESTURES[gesture_id]
             request = controller.prepare_gesture(session, gesture.name, gesture.frames)
+            if trace is not None:
+                trace.cancel(session)
             task = asyncio.create_task(asyncio.to_thread(controller.plan_gesture, request))
             plans[task] = command_id, request
             return None
         if action == "set_joint":
             if not isinstance(command.get("joint"), str):
                 raise Rejected("Missing arm joint")
-            controller.set_joint(session, command["joint"], command.get("angle"))
+            joint = command["joint"]
+            angle = command.get("angle")
+            before = controller.status if trace is not None else None
+            controller.set_joint(session, joint, angle)
+            if trace is not None:
+                if before.motion is Motion.IDLE and before.measured is not None:
+                    trace.start(session, command_id, JOINT_NAMES.index(joint), angle, before.measured, received_at)
+                else:
+                    trace.cancel(session)
         else:
             actions = {
                 "take_control": controller.take_control, "release_control": controller.disconnect,
@@ -83,6 +103,8 @@ def handle_command(controller: MotionController, session: str, raw: str,
             if action not in actions:
                 raise Rejected("Unknown command")
             actions[action](session)
+            if trace is not None and action in {"stop", "release_control"}:
+                trace.cancel(session)
     except (ValueError, TypeError, RecursionError) as error:
         return {"type": "ack", "id": command_id if type(command_id) is int else None,
                 "ok": False, "message": str(error) if isinstance(error, Rejected) else "Invalid command"}
@@ -106,6 +128,8 @@ def finish_gesture(controller: MotionController, session: str, task: asyncio.Tas
 
 def create_app(backend: str) -> FastAPI:
     """Build the same local console for the mock or the isolated DDS simulator."""
+    trace = LatencyTrace() if backend == "sim" and os.environ.get("G1_MEASURE_LATENCY") == "1" else None
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         simulator = worker = None
@@ -117,7 +141,7 @@ def create_app(backend: str) -> FastAPI:
 
                 clearance = MujocoClearance()
                 simulator = subprocess.Popen([sys.executable, "-m", "g1_control.simulator"])
-                transport = DdsTransport()
+                transport = DdsTransport(trace)
             else:
                 from g1_control.mock import MockTransport
 
@@ -161,7 +185,7 @@ def create_app(backend: str) -> FastAPI:
         session = uuid4().hex
         controller = app.state.controller
         await socket.accept()
-        incoming = asyncio.create_task(socket.receive_text())
+        incoming = asyncio.create_task(receive_command(socket))
         plans = {}
         loop = asyncio.get_running_loop()
         next_state = loop.time()
@@ -169,13 +193,15 @@ def create_app(backend: str) -> FastAPI:
             while True:
                 if loop.time() >= next_state:
                     await socket.send_json(state_for(controller, session))
+                    if trace is not None and (timing := trace.take(session)) is not None:
+                        await socket.send_json(timing)
                     next_state = loop.time() + STATE_PERIOD
                 ready, _ = await asyncio.wait({incoming, *plans}, timeout=max(0, next_state - loop.time()),
                                               return_when=asyncio.FIRST_COMPLETED)
                 if incoming in ready:
                     ready.remove(incoming)
-                    acknowledgment = handle_command(controller, session, incoming.result(), plans)
-                    incoming = asyncio.create_task(socket.receive_text())
+                    acknowledgment = handle_command(controller, session, incoming.result(), plans, trace)
+                    incoming = asyncio.create_task(receive_command(socket))
                     if acknowledgment is not None:
                         await socket.send_json(acknowledgment)
                 for task in ready:
@@ -185,6 +211,8 @@ def create_app(backend: str) -> FastAPI:
             pass
         finally:
             controller.disconnect(session)
+            if trace is not None:
+                trace.cancel(session)
             for task in plans:
                 task.cancel()
             await asyncio.gather(*plans, return_exceptions=True)

@@ -11,6 +11,8 @@ let modelError = false;
 let nextId = 0;
 let side = "left";
 let lastStateAt = 0;
+let nextSliderWrite = 0;
+let sliderTimer = null;
 
 const messages = {
   take_control: "Control acquired. Enable motion when ready.",
@@ -41,6 +43,22 @@ function angleText(angle) {
   return `${(Math.abs(degrees) < 0.05 ? 0 : degrees).toFixed(1)}°`;
 }
 
+function flushTargets() {
+  if (!pending.size || sliderTimer !== null) return;
+  const wait = Math.max(0, nextSliderWrite - performance.now());
+  const congested = socket?.bufferedAmount > 1024;
+  if (wait || congested) {
+    sliderTimer = setTimeout(() => {
+      sliderTimer = null;
+      flushTargets();
+    }, congested ? Math.max(33, wait) : wait);
+    return;
+  }
+  nextSliderWrite = performance.now() + 33;
+  for (const [joint, angle] of pending) send("set_joint", { joint, angle });
+  pending.clear();
+}
+
 function addRow(joint, index) {
   const root = document.createElement("div");
   root.className = "joint";
@@ -66,6 +84,7 @@ function addRow(joint, index) {
     row.lastEdit = performance.now();
     pending.set(joint.name, Number(slider.value) / DEG);
     row.target.textContent = `${Number(slider.value).toFixed(1)}°`;
+    flushTargets();
   });
   row.index = index;
   rows.push(row);
@@ -212,11 +231,6 @@ setInterval(() => {
   }
   if (state?.owned) send("heartbeat");
 }, 300);
-setInterval(() => {
-  if (socket?.bufferedAmount > 1024) return;
-  for (const [joint, angle] of pending) send("set_joint", { joint, angle });
-  pending.clear();
-}, 33);
 
 try {
   const config = await fetch("/config");
