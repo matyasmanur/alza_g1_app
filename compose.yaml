@@ -1,0 +1,28 @@
+services:
+  unitree:
+    build:
+      context: .
+      args:
+        SDK_VERSION: ${SDK_VERSION:-b7fec6020eb93d4c059a6edf19905e12a75a8d3d}
+        UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
+    image: unitree-g1:local
+    platform: linux/arm64
+    working_dir: /work
+    volumes:
+      - .:/work
+    stdin_open: true
+    tty: true
+    init: true
+    ports:
+      - "127.0.0.1:6080:6080"
+    command:
+      - xvfb-run
+      - -a
+      - -s
+      - "-screen 0 1280x800x24"
+      - sh
+      - -ec
+      - |
+        x11vnc -localhost -nopw -forever -shared -rfbport 5900 &
+        websockify --web /usr/share/novnc 6080 localhost:5900 &
+        exec /opt/unitree_mujoco/simulate/build/unitree_mujoco -r g1 -s scene.xml -t 1
