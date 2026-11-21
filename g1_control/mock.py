@@ -4,7 +4,7 @@ from time import monotonic
 from typing import Callable
 
 from g1_control.joints import JOINT_NAMES
-from g1_control.protocol import COMMAND_TIMEOUT
+from g1_control.protocol import ARM_START, COMMAND_TIMEOUT
 from g1_control.transport import Angles, Feedback
 
 
@@ -37,7 +37,7 @@ class MockTransport:
         if not self.feedback_enabled:
             return None
         velocity = tuple(delta / elapsed if elapsed else 0.0 for delta in displacement)
-        return Feedback(now, self.position, velocity)
+        return Feedback(now, self.position, velocity, lower_position=(0.0,) * ARM_START)
 
     def write(self, position: Angles, velocity: Angles, *, enabled: bool) -> None:
         """Apply the next setpoint or capture a local hold on release."""

@@ -8,11 +8,12 @@ Angles = tuple[float, ...]
 
 @dataclass(frozen=True)
 class Feedback:
-    """Measured radians and radians per second, in arm DDS order."""
+    """Measured arm angles and velocities, plus leg and waist angles in DDS order."""
 
     received_at: float
     position: Angles
     velocity: Angles
+    lower_position: Angles
 
 
 class ArmTransport(Protocol):

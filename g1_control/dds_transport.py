@@ -41,9 +41,10 @@ class DdsTransport:
         motors = message.motor_state[ARM_START:ARM_END]
         position = tuple(motor.q for motor in motors)
         velocity = tuple(motor.dq for motor in motors)
-        if all(map(isfinite, position + velocity)):
+        lower_position = tuple(motor.q for motor in message.motor_state[:ARM_START])
+        if all(map(isfinite, lower_position + position + velocity)):
             self._last_tick = message.tick
-            self._latest = Feedback(monotonic(), position, velocity)
+            self._latest = Feedback(monotonic(), position, velocity, lower_position)
 
     def read(self) -> Feedback | None:
         """Return the most recent valid, advancing G1 arm sample."""
