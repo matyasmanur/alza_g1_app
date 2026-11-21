@@ -1,4 +1,34 @@
 services:
+  web-mock:
+    profiles: [web-mock]
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      target: mock
+      args:
+        UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: [".:/work:ro"]
+    init: true
+    command: ["python", "-B", "-m", "g1_control.web", "--backend", "mock"]
+
+  web-sim:
+    profiles: [web-sim]
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      target: sim
+      additional_contexts:
+        arm_sdk: service:arm-sim
+      args:
+        SIM_BASE: arm_sdk
+        UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
+    platform: linux/arm64
+    ports: ["127.0.0.1:8001:8000"]
+    volumes: [".:/work:ro"]
+    init: true
+    command: ["python", "-B", "-m", "g1_control.web", "--backend", "sim"]
+
   arm-mock:
     profiles: [arm-mock]
     image: python:3.10-slim
@@ -10,7 +40,7 @@ services:
     command: ["python", "-B", "-m", "unittest", "discover", "-s", "tests", "-v"]
 
   arm-sim:
-    profiles: [arm-sim]
+    profiles: [arm-sim, web-sim]
     build:
       context: .
       dockerfile: Dockerfile.arm-sim

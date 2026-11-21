@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>G1 Arm Console</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="importmap">{"imports":{"three":"/assets/vendor/three.module.min.js"}}</script>
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span class="mark" aria-hidden="true">G1</span><h1>Arm Console</h1></div>
+      <div class="top-actions">
+        <span id="backend" class="source">Connecting</span>
+        <button id="stop" class="stop" type="button" disabled><span aria-hidden="true">■</span> Stop motion</button>
+      </div>
+    </div>
+  </header>
+  <main>
+    <section class="status" aria-label="Robot status">
+      <div><span>Connection</span><strong id="connection" data-tone="neutral">Waiting</strong></div>
+      <div><span>Control</span><strong id="ownership">Observation</strong></div>
+      <div><span>Motion</span><strong id="motion" data-tone="neutral">Idle</strong></div>
+    </section>
+    <div class="workspace">
+      <section class="card robot" aria-labelledby="view-title">
+        <div class="card-title">
+          <h2 id="view-title">Robot view</h2>
+          <button id="reset-camera" class="secondary small" type="button" disabled>Reset camera</button>
+        </div>
+        <div id="viewport" class="viewport" aria-label="Interactive 3D view of the Unitree G1">
+          <span id="model-status" class="view-status">Loading G1 model</span>
+        </div>
+        <div class="view-footer"><strong>Measured pose</strong><span>Drag to orbit · Scroll to zoom</span></div>
+      </section>
+      <section class="card controls" aria-labelledby="controls-title">
+        <div class="card-title"><h2 id="controls-title">Arm controls</h2><span class="units">Degrees</span></div>
+        <div class="session-actions">
+          <button id="take-control" class="primary" type="button" disabled>Take control</button>
+          <button id="enable" class="primary" type="button" hidden>Enable motion</button>
+          <button id="reset-stop" class="secondary" type="button" hidden>Reset Stop</button>
+          <button id="release-control" class="secondary" type="button" hidden>Release control</button>
+        </div>
+        <div class="tabs" role="group" aria-label="Arm to control">
+          <button type="button" data-side="left" aria-pressed="true">Left arm</button>
+          <button type="button" data-side="right" aria-pressed="false">Right arm</button>
+        </div>
+        <div class="columns"><span>Joint</span><span>Target</span><span>Measured</span></div>
+        <div id="joints"></div>
+        <p id="command-status" role="status" class="command-status">Take control to enable joint motion.</p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

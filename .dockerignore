@@ -1,3 +1,6 @@
 **
 !Dockerfile
 !Dockerfile.arm-sim
+!Dockerfile.web
+!requirements-web.txt
+!g1_control/export_model.py
