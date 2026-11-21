@@ -1,85 +1,58 @@
 services:
+  web-sim:
+    build:
+      context: .
+      target: web-sim
+    platform: linux/arm64
+    ports:
+      - "127.0.0.1:8001:8000"
+      - "127.0.0.1:6080:6080"
+    environment:
+      G1_MEASURE_LATENCY: ${G1_MEASURE_LATENCY:-0}
+      G1_SIM_VIEWER: ${G1_SIM_VIEWER:-1}
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    volumes: [".:/work:ro"]
+    init: true
+    command:
+      - sh
+      - -ec
+      - |
+        if [ "$$G1_SIM_VIEWER" = 1 ]; then
+          exec xvfb-run -a -s "-screen 0 1280x900x24" sh -ec '
+            x11vnc -localhost -nopw -forever -shared -rfbport 5900 &
+            websockify --web /usr/share/novnc 6080 localhost:5900 &
+            exec python -B -m g1_control.web --backend sim
+          '
+        fi
+        exec python -B -m g1_control.web --backend sim
+
   web-mock:
     profiles: [web-mock]
     build:
       context: .
-      dockerfile: Dockerfile.web
       target: mock
-      args:
-        UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
     ports: ["127.0.0.1:8000:8000"]
     volumes: [".:/work:ro"]
     init: true
     command: ["python", "-B", "-m", "g1_control.web", "--backend", "mock"]
-
-  web-sim:
-    profiles: [web-sim]
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-      target: sim
-      additional_contexts:
-        arm_sdk: service:arm-sim
-      args:
-        SIM_BASE: arm_sdk
-        UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
-    platform: linux/arm64
-    ports: ["127.0.0.1:8001:8000"]
-    environment:
-      G1_MEASURE_LATENCY: ${G1_MEASURE_LATENCY:-0}
-    volumes: [".:/work:ro"]
-    init: true
-    command: ["python", "-B", "-m", "g1_control.web", "--backend", "sim"]
 
   arm-mock:
     profiles: [arm-mock]
     image: python:3.10-slim
     network_mode: none
     working_dir: /work
-    volumes:
-      - .:/work:ro
+    volumes: [".:/work:ro"]
     init: true
     command: ["python", "-B", "-m", "unittest", "discover", "-s", "tests", "-v"]
 
   arm-sim:
-    profiles: [arm-sim, web-sim]
+    profiles: [arm-sim]
     build:
       context: .
-      dockerfile: Dockerfile.arm-sim
-      args:
-        UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
+      target: arm-sim
     image: unitree-g1:arm-sim
     platform: linux/arm64
     network_mode: none
-    volumes:
-      - .:/work:ro
+    volumes: [".:/work:ro"]
     init: true
     command: ["python", "-m", "g1_control.simulator"]
-
-  unitree:
-    build:
-      context: .
-      args:
-        SDK_VERSION: ${SDK_VERSION:-b7fec6020eb93d4c059a6edf19905e12a75a8d3d}
-        UNITREE_MUJOCO_VERSION: ${UNITREE_MUJOCO_VERSION:-1eb6642e3f3fdfb7fb13a9794fd6a2dd93ea0e7d}
-    image: unitree-g1:local
-    platform: linux/arm64
-    working_dir: /work
-    volumes:
-      - .:/work
-    stdin_open: true
-    tty: true
-    init: true
-    ports:
-      - "127.0.0.1:6080:6080"
-    command:
-      - xvfb-run
-      - -a
-      - -s
-      - "-screen 0 1280x800x24"
-      - sh
-      - -ec
-      - |
-        x11vnc -localhost -nopw -forever -shared -rfbport 5900 &
-        websockify --web /usr/share/novnc 6080 localhost:5900 &
-        exec /opt/unitree_mujoco/simulate/build/unitree_mujoco -r g1 -s scene.xml -t 1

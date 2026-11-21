@@ -6,6 +6,9 @@ torque with the local hold, which approximates ownership for simulation.
 """
 
 import argparse
+import os
+from collections.abc import Callable
+from copy import copy
 from pathlib import Path
 from threading import Lock
 from time import monotonic, sleep
@@ -144,7 +147,7 @@ class ArmSimulator:
         self.state.crc = self.crc.Crc(self.state)
         self.publisher.Write(self.state)
 
-    def run(self) -> None:
+    def run(self, render: Callable[[], None] | None = None) -> None:
         """Advance physics at the model timestep and publish at 50 Hz."""
         deadline = next_state = monotonic()
         step_period = self.plant.model.opt.timestep
@@ -156,9 +159,34 @@ class ArmSimulator:
             self.plant.step(now, command)
             if now >= next_state:
                 self.publish_state()
+                if render is not None:
+                    render()
                 next_state = now + COMMAND_PERIOD
             deadline = max(deadline + step_period, now)
             sleep(max(0, deadline - monotonic()))
+
+
+def run_with_viewer(simulator: ArmSimulator) -> None:
+    """Show the live pose while isolating native GUI edits from physics."""
+    from mujoco.viewer import launch_passive
+
+    plant = simulator.plant
+    model = copy(plant.model)
+    data = mujoco.MjData(model)
+    with launch_passive(model, data) as viewer:
+        with viewer.lock():
+            viewer.cam.lookat[:] = plant.data.qpos[:3]
+            viewer.cam.distance = 2.5
+            viewer.cam.azimuth = 135
+            viewer.cam.elevation = -10
+
+        def render() -> None:
+            if viewer.is_running():
+                data.qpos[:] = plant.data.qpos
+                data.time = plant.data.time
+                viewer.sync(state_only=True)
+
+        simulator.run(render)
 
 
 def main() -> None:
@@ -167,7 +195,11 @@ def main() -> None:
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     model = load_supported_model(parser.parse_args().model)
     ChannelFactoryInitialize(DOMAIN_ID, INTERFACE)
-    ArmSimulator(model).run()
+    simulator = ArmSimulator(model)
+    if os.environ.get("G1_SIM_VIEWER") == "1":
+        run_with_viewer(simulator)
+    else:
+        simulator.run()
 
 
 if __name__ == "__main__":
