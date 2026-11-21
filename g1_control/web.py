@@ -15,8 +15,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from g1_control.controller import MotionController, Rejected
+from g1_control.gestures import GESTURES
 from g1_control.joints import JOINT_LIMITS, TARGET_MARGIN
 from g1_control.protocol import COMMAND_PERIOD
+from g1_control.trajectory import PlanRequest, UnsafePath
 
 WEB_DIRECTORY = Path(__file__).resolve().parent / "static"
 ASSET_DIRECTORY = Path("/opt/web-assets")
@@ -40,12 +42,13 @@ def state_for(controller: MotionController, session: str) -> dict:
     return {
         "type": "state", "connection": state.connection, "owned": state.owner == session,
         "control_taken": state.owner is not None, "enabled": state.enabled, "motion": state.motion.value,
-        "stop_latched": state.stop_latched, "fault": state.fault, "target": state.target,
+        "stop_latched": state.stop_latched, "fault": state.fault, "target": state.target, "gesture": state.gesture,
         "pose": None if state.measured is None else state.measured.lower_position + state.measured.position,
     }
 
 
-def handle_command(controller: MotionController, session: str, raw: str) -> dict | None:
+def handle_command(controller: MotionController, session: str, raw: str,
+                   plans: dict[asyncio.Task, tuple[int, PlanRequest]]) -> dict | None:
     """Apply one browser command and acknowledge it. Successful heartbeats are silent."""
     command_id = None
     try:
@@ -59,6 +62,15 @@ def handle_command(controller: MotionController, session: str, raw: str) -> dict
             return None
         if type(command_id) is not int:
             raise Rejected("Invalid command ID")
+        if action == "gesture":
+            gesture_id = command.get("gesture")
+            if not isinstance(gesture_id, str) or gesture_id not in GESTURES:
+                raise Rejected("Unknown gesture")
+            gesture = GESTURES[gesture_id]
+            request = controller.prepare_gesture(session, gesture.name, gesture.frames)
+            task = asyncio.create_task(asyncio.to_thread(controller.plan_gesture, request))
+            plans[task] = command_id, request
+            return None
         if action == "set_joint":
             if not isinstance(command.get("joint"), str):
                 raise Rejected("Missing arm joint")
@@ -77,22 +89,40 @@ def handle_command(controller: MotionController, session: str, raw: str) -> dict
     return {"type": "ack", "id": command_id, "ok": True}
 
 
+def finish_gesture(controller: MotionController, session: str, task: asyncio.Task,
+                   command_id: int, request: PlanRequest) -> dict:
+    """Commit a completed plan on the controller loop and return command feedback."""
+    try:
+        try:
+            segments = task.result()
+        except UnsafePath as error:
+            controller.finish_plan(session, request, ())
+            raise Rejected(str(error)) from error
+        controller.finish_plan(session, request, segments)
+    except Rejected as error:
+        return {"type": "ack", "id": command_id, "ok": False, "message": str(error)}
+    return {"type": "ack", "id": command_id, "ok": True}
+
+
 def create_app(backend: str) -> FastAPI:
     """Build the same local console for the mock or the isolated DDS simulator."""
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         simulator = worker = None
+        clearance = None
         try:
             if backend == "sim":
+                from g1_control.clearance import MujocoClearance
                 from g1_control.dds_transport import DdsTransport
 
+                clearance = MujocoClearance()
                 simulator = subprocess.Popen([sys.executable, "-m", "g1_control.simulator"])
                 transport = DdsTransport()
             else:
                 from g1_control.mock import MockTransport
 
                 transport = MockTransport()
-            app.state.controller = MotionController(transport)
+            app.state.controller = MotionController(transport, clearance=clearance)
             worker = asyncio.create_task(run_controller(app.state.controller))
             yield
         finally:
@@ -114,10 +144,13 @@ def create_app(backend: str) -> FastAPI:
 
     @app.get("/config")
     async def config():
-        return {"backend": backend, "joints": [
-            {"name": name, "min": low + TARGET_MARGIN, "max": high - TARGET_MARGIN}
-            for name, (low, high) in JOINT_LIMITS.items()
-        ]}
+        return {
+            "backend": backend,
+            "joints": [{"name": name, "min": low + TARGET_MARGIN, "max": high - TARGET_MARGIN}
+                       for name, (low, high) in JOINT_LIMITS.items()],
+            "gestures": [{"id": slug, "name": gesture.name, "sdk_id": gesture.sdk_id}
+                         for slug, gesture in GESTURES.items()],
+        }
 
     @app.websocket("/control")
     async def control(socket: WebSocket):
@@ -129,6 +162,7 @@ def create_app(backend: str) -> FastAPI:
         controller = app.state.controller
         await socket.accept()
         incoming = asyncio.create_task(socket.receive_text())
+        plans = {}
         loop = asyncio.get_running_loop()
         next_state = loop.time()
         try:
@@ -136,16 +170,24 @@ def create_app(backend: str) -> FastAPI:
                 if loop.time() >= next_state:
                     await socket.send_json(state_for(controller, session))
                     next_state = loop.time() + STATE_PERIOD
-                ready, _ = await asyncio.wait({incoming}, timeout=max(0, next_state - loop.time()))
+                ready, _ = await asyncio.wait({incoming, *plans}, timeout=max(0, next_state - loop.time()),
+                                              return_when=asyncio.FIRST_COMPLETED)
                 if incoming in ready:
-                    acknowledgment = handle_command(controller, session, incoming.result())
+                    ready.remove(incoming)
+                    acknowledgment = handle_command(controller, session, incoming.result(), plans)
                     incoming = asyncio.create_task(socket.receive_text())
                     if acknowledgment is not None:
                         await socket.send_json(acknowledgment)
+                for task in ready:
+                    command_id, request = plans.pop(task)
+                    await socket.send_json(finish_gesture(controller, session, task, command_id, request))
         except (WebSocketDisconnect, OSError):
             pass
         finally:
             controller.disconnect(session)
+            for task in plans:
+                task.cancel()
+            await asyncio.gather(*plans, return_exceptions=True)
             incoming.cancel()
             with suppress(asyncio.CancelledError, WebSocketDisconnect, OSError):
                 await incoming

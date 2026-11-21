@@ -5,6 +5,7 @@ const DEG = 180 / Math.PI;
 const rows = [];
 const pending = new Map();
 const commands = new Map();
+const featured = ["wave", "high-five", "handshake"];
 let socket, state, viewer;
 let modelError = false;
 let nextId = 0;
@@ -15,6 +16,7 @@ const messages = {
   take_control: "Control acquired. Enable motion when ready.",
   enable: "Motion enabled. Adjust an arm joint.",
   set_joint: "Joint target accepted.",
+  gesture: "Gesture started.",
   stop: "Stop requested. Waiting for the arms to settle.",
   reset_stop: "Stop reset. Motion is disabled.",
   release_control: "Control released.",
@@ -70,25 +72,58 @@ function addRow(joint, index) {
   $("joints").append(root);
 }
 
+function playGesture(gesture) {
+  if (!gesture) return;
+  feedback("Checking gesture path…");
+  send("gesture", { gesture });
+}
+
+function addGestures(gestures) {
+  const groups = ["Unitree-inspired", "Original"].map(label => {
+    const group = document.createElement("optgroup");
+    group.label = label;
+    $("gesture-select").append(group);
+    return group;
+  });
+  for (const gesture of gestures) {
+    const option = new Option(gesture.name, gesture.id);
+    groups[gesture.sdk_id === null ? 1 : 0].append(option);
+    if (featured.includes(gesture.id)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary";
+      button.textContent = gesture.name;
+      button.addEventListener("click", () => playGesture(gesture.id));
+      $("featured-gestures").append(button);
+    }
+  }
+}
+
 function render() {
   const connection = state?.connection ?? "offline";
   const connected = connection === "connected";
   const stopping = state?.motion === "stopping";
-  const manual = connected && state.owned && state.enabled && state.motion !== "gesture";
+  const busy = ["planning", "gesture"].includes(state?.motion);
+  const manual = connected && state.owned && state.enabled && !busy;
+  const canPlay = manual && state.motion === "idle";
   const owned = connected && state.owned;
   $("connection").textContent = { connected: "Connected", waiting: "Waiting for feedback", stale: "Stale feedback", offline: "Offline" }[connection];
   $("connection").dataset.tone = connected ? "good" : connection === "waiting" ? "neutral" : "danger";
   $("ownership").textContent = owned ? "You have control" : state?.control_taken ? "Another operator" : "Observation";
   const latched = state?.stop_latched;
   $("motion").textContent = stopping ? "Stopping" : latched ? "Stopped · Latched" :
-    { manual: "Manual motion", gesture: "Gesture running", idle: "Idle" }[state?.motion ?? "idle"];
-  $("motion").dataset.tone = (latched || stopping) ? "danger" : manual ? "active" : "neutral";
+    { manual: "Manual motion", planning: `Planning · ${state?.gesture}`,
+      gesture: `Running · ${state?.gesture}`, idle: "Idle" }[state?.motion ?? "idle"];
+  $("motion").dataset.tone = (latched || stopping) ? "danger" : manual || busy ? "active" : "neutral";
   $("take-control").hidden = Boolean(owned);
   $("take-control").disabled = !connected || state.control_taken || stopping;
   $("enable").hidden = !owned || state.enabled || latched || stopping;
   $("reset-stop").hidden = !owned || !latched || stopping;
   $("release-control").hidden = !owned;
   $("stop").disabled = !owned || latched;
+  for (const button of $("featured-gestures").children) button.disabled = !canPlay;
+  $("gesture-select").disabled = !canPlay;
+  $("play-gesture").disabled = !canPlay || !$("gesture-select").value;
   if (!manual) {
     pending.clear();
     for (const row of rows) row.dragging = false;
@@ -124,6 +159,9 @@ function connect() {
       if (state.stop_latched && state.motion === "idle" && previous?.motion === "stopping") {
         feedback("Motion stopped. Reset Stop before enabling again.");
       }
+      if (state.enabled && state.motion === "idle" && previous?.motion === "gesture") {
+        feedback("Gesture complete. Arms returned to Ready.");
+      }
       if (previous?.owned && !state.owned && !state.fault) feedback("Control released. Take control to move again.");
       render();
       return;
@@ -132,6 +170,7 @@ function connect() {
     commands.delete(message.id);
     if (message.ok && action) feedback(messages[action]);
     if (!message.ok && action) {
+      if (action === "gesture" && message.message === "Gesture planning was cancelled") return;
       if (action === "set_joint") rows.forEach(row => { row.lastEdit = -Infinity; });
       feedback(message.message, true);
     }
@@ -146,6 +185,8 @@ function connect() {
   });
 }
 
+$("gesture-select").addEventListener("change", render);
+$("play-gesture").addEventListener("click", () => playGesture($("gesture-select").value));
 for (const button of document.querySelectorAll("[data-side]")) {
   button.addEventListener("click", () => {
     side = button.dataset.side;
@@ -180,9 +221,10 @@ setInterval(() => {
 try {
   const config = await fetch("/config");
   if (!config.ok) throw new Error("Configuration unavailable");
-  const { backend, joints } = await config.json();
+  const { backend, joints, gestures } = await config.json();
   $("backend").textContent = backend === "sim" ? "MuJoCo" : "Mock";
   joints.forEach(addRow);
+  addGestures(gestures);
   render();
   connect();
 } catch (error) {
