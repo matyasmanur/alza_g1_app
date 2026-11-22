@@ -7,7 +7,7 @@ COMPOSE += -f compose.gpu.yaml
 endif
 endif
 
-.PHONY: build up down
+.PHONY: build up down shell
 
 build:
 	$(COMPOSE) build web-sim web-mock
@@ -21,6 +21,9 @@ endif
 
 down:
 	$(COMPOSE) --profile web-mock down
+
+shell:
+	$(COMPOSE) exec web-sim bash
 
 ifneq ($(filter up,$(MAKECMDGOALS)),)
 .PHONY: web-sim web-mock
