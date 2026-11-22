@@ -1,4 +1,4 @@
-import { createViewer } from "/static/viewer.js";
+import { createViewer } from "/static/viewer.js?v=2";
 
 const $ = id => document.getElementById(id);
 const DEG = 180 / Math.PI;
@@ -8,7 +8,6 @@ const commands = new Map();
 const featured = { wave: "👋", "high-five": "🖐️", handshake: "🤝" };
 const clock = () => new Date().toLocaleTimeString("en-GB");
 let socket, state, viewer;
-let modelError = false;
 let nextId = 0;
 let side = "left";
 let backendLabel = "";
@@ -199,8 +198,9 @@ function render() {
     row.root.toggleAttribute("data-live", Number.isFinite(measured));
     row.root.style.setProperty("--measured", Math.min(1, Math.max(0, (measured * DEG - min) / (max - min))));
   }
-  if (viewer && !modelError) {
-    $("model-status").textContent = connected ? "Live feedback" : state?.pose ? "Last measured pose" : "Waiting for feedback";
+  if (viewer) {
+    $("model-status").textContent = viewer.status ||
+      (connected ? "Live feedback" : state?.pose ? "Last measured pose" : "Waiting for feedback");
   }
 }
 
@@ -299,12 +299,11 @@ try {
 }
 
 try {
-  viewer = await createViewer($("viewport"));
+  viewer = await createViewer($("viewport"), render);
   viewer.showPose(state?.pose, true);
   $("reset-camera").disabled = false;
   $("reset-camera").addEventListener("click", viewer.resetCamera);
   render();
 } catch (error) {
-  modelError = true;
   $("model-status").textContent = `3D view unavailable · ${error.message}`;
 }

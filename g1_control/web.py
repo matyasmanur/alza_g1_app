@@ -170,7 +170,7 @@ def create_app(backend: str) -> FastAPI:
 
     @app.get("/")
     async def index():
-        return FileResponse(WEB_DIRECTORY / "index.html")
+        return FileResponse(WEB_DIRECTORY / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/config")
     async def config():

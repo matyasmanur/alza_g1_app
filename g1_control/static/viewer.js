@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "/assets/vendor/OrbitControls.js";
 import { STLLoader } from "/assets/vendor/STLLoader.js";
+import { createPosePreview } from "/static/pose-preview.js";
 
 function transform(object, position, [w, x, y, z]) {
   object.position.fromArray(position);
@@ -11,7 +12,7 @@ function meshNames(body) {
   return [...body.visuals.map(({ mesh }) => mesh), ...body.children.flatMap(meshNames)];
 }
 
-export async function createViewer(container) {
+export async function createViewer(container, onStatusChange) {
   const response = await fetch("/assets/g1.json");
   if (!response.ok) throw new Error("G1 model could not be loaded");
   const { root, joints } = await response.json();
@@ -51,7 +52,6 @@ export async function createViewer(container) {
           color: new THREE.Color(...visual.color), roughness: 0.62, metalness: 0.22,
         });
         const mesh = new THREE.Mesh(geometry.get(visual.mesh), material);
-        mesh.castShadow = !ghost;
         materials.push(material);
         transform(mesh, visual.position, visual.quaternion);
         content.add(mesh);
@@ -71,7 +71,7 @@ export async function createViewer(container) {
     return { robot, rig: joints.map(name => pivots.get(name)) };
   }
 
-  const { rig } = makeRobot(false);
+  const { robot, rig } = makeRobot(false);
   const ghost = makeRobot(true);
   ghost.robot.visible = false;
 
@@ -80,25 +80,18 @@ export async function createViewer(container) {
   scene.add(grid, new THREE.HemisphereLight(0xf0f6ff, 0x64758b, 2.2));
   const key = new THREE.DirectionalLight(0xffffff, 2.8);
   key.position.set(3, 6, 2);
-  key.castShadow = true;
-  key.shadow.mapSize.set(1024, 1024);
-  Object.assign(key.shadow.camera, { left: -2, right: 2, top: 2, bottom: -2 });
-  const floor = new THREE.Mesh(new THREE.CircleGeometry(4, 48), new THREE.ShadowMaterial({ opacity: 0.45 }));
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.y = -0.01;
-  floor.receiveShadow = true;
   const rim = new THREE.DirectionalLight(0x91b9ff, 1.5);
   rim.position.set(-3, 3, -2);
-  scene.add(key, rim, floor);
+  scene.add(key, rim);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.shadowMap.enabled = true;
-  container.prepend(renderer.domElement);
+  let canvas = document.createElement("canvas");
+  let renderer;
+  let preview;
+  let status = "";
+  container.prepend(canvas);
   const camera = new THREE.PerspectiveCamera(34, 1, 0.03, 30);
   camera.position.set(2.12, 1.36, -1.65);
-  const controls = new OrbitControls(camera, renderer.domElement);
+  const controls = new OrbitControls(camera, canvas);
   controls.target.set(0, 0.70, 0);
   controls.enableDamping = true;
   controls.minDistance = 0.75;
@@ -106,12 +99,54 @@ export async function createViewer(container) {
   controls.maxPolarAngle = Math.PI * 0.52;
   controls.update();
   controls.saveState();
+
+  function usePosePreview() {
+    renderer?.dispose();
+    renderer = null;
+    const replacement = document.createElement("canvas");
+    replacement.width = canvas.width;
+    replacement.height = canvas.height;
+    controls.disconnect();
+    canvas.replaceWith(replacement);
+    canvas = replacement;
+    controls.connect(canvas);
+    preview = createPosePreview(canvas, [robot, ghost.robot]);
+    status = "Simplified 3D view · WebGL unavailable";
+    onStatusChange();
+  }
+
+  // Register before Three.js so it cannot start another restore cycle.
+  canvas.addEventListener("webglcontextlost", event => {
+    event.stopImmediatePropagation();
+    usePosePreview();
+  }, { once: true });
+  try {
+    const context = canvas.getContext("webgl2");
+    if (context) renderer = new THREE.WebGLRenderer({ canvas, context });
+  } catch (error) {
+    console.warn("WebGL viewer unavailable", error);
+  }
+  if (renderer) {
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  } else {
+    usePosePreview();
+  }
+
   new ResizeObserver(([entry]) => {
     const { width, height } = entry.contentRect;
     if (height === 0 || width === 0) return;
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
-    renderer.setSize(width, height, false);
+    // Keep the drawing buffer bounded on Retina and large displays.
+    const scale = Math.min(1, 1600 / Math.max(width, height));
+    const bufferWidth = Math.round(width * scale);
+    const bufferHeight = Math.round(height * scale);
+    if (renderer) {
+      renderer.setSize(bufferWidth, bufferHeight, false);
+    } else {
+      canvas.width = bufferWidth;
+      canvas.height = bufferHeight;
+    }
   }).observe(container);
 
   const glow = { hover: [], clash: [] };
@@ -119,7 +154,9 @@ export async function createViewer(container) {
   let target = Array(joints.length).fill(0);
   let displayed = target.slice();
   let lastFrame = performance.now();
-  renderer.setAnimationLoop(now => {
+  function draw(now) {
+    requestAnimationFrame(draw);
+    if (now - lastFrame < 1000 / 60 - 1) return;
     const step = 1 - Math.exp(-Math.max(0, now - lastFrame) / 32);
     lastFrame = now;
     rig.forEach(({ pivot, axis }, index) => {
@@ -135,10 +172,18 @@ export async function createViewer(container) {
       });
     }
     controls.update();
-    renderer.render(scene, camera);
-  });
+    if (renderer) {
+      renderer.render(scene, camera);
+    } else {
+      scene.updateMatrixWorld();
+      camera.updateMatrixWorld();
+      preview(camera);
+    }
+  }
+  requestAnimationFrame(draw);
 
   return {
+    get status() { return status; },
     resetCamera: () => controls.reset(),
     highlight(kind, names) {
       glow[kind] = names;
