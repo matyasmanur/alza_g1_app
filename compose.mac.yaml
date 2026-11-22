@@ -1,0 +1,23 @@
+services:
+  web-sim:
+    build:
+      target: web-sim-mac
+    ports: ["127.0.0.1:6080:6080"]
+    environment:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      XAUTHORITY: !reset null
+    uts: !reset null
+    ipc: !reset null
+    volumes: !override [".:/work:ro"]
+    command:
+      - sh
+      - -ec
+      - |
+        if [ "$$G1_SIM_VIEWER" = 1 ]; then
+          exec xvfb-run -a -s "-screen 0 1280x900x24" sh -ec '
+            x11vnc -localhost -nopw -forever -shared -rfbport 5900 &
+            websockify --web /usr/share/novnc 6080 localhost:5900 &
+            exec python -B -m g1_control.web --backend sim
+          '
+        fi
+        exec python -B -m g1_control.web --backend sim

@@ -1,0 +1,29 @@
+COMPOSE := docker compose -f compose.yaml
+ifeq ($(shell uname -s),Darwin)
+COMPOSE += -f compose.mac.yaml
+else ifeq ($(filter web-sim,$(MAKECMDGOALS)),web-sim)
+ifneq ($(shell docker info --format '{{if index .Runtimes "nvidia"}}yes{{end}}'),)
+COMPOSE += -f compose.gpu.yaml
+endif
+endif
+
+.PHONY: build up down
+
+build:
+	$(COMPOSE) build web-sim web-mock
+
+up:
+ifeq ($(words $(filter web-sim web-mock,$(MAKECMDGOALS))),1)
+	$(COMPOSE) up $(filter web-sim web-mock,$(MAKECMDGOALS))
+else
+	@echo "Usage: make up web-sim | make up web-mock" >&2; exit 2
+endif
+
+down:
+	$(COMPOSE) --profile web-mock down
+
+ifneq ($(filter up,$(MAKECMDGOALS)),)
+.PHONY: web-sim web-mock
+web-sim web-mock: up
+	@:
+endif

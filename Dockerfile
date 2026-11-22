@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential ca-certificates cmake git libgl1 libglib2.0-0 \
     python3-dev python3-venv && rm -rf /var/lib/apt/lists/*
 
-# Cyclone DDS 0.10.2 has no Linux ARM64 wheel on PyPI.
+# Use the same Cyclone DDS build on both architectures (no ARM64 wheel).
 RUN git clone --depth 1 --branch 0.10.2 https://github.com/eclipse-cyclonedds/cyclonedds.git /tmp/cyclonedds \
     && cmake -S /tmp/cyclonedds -B /tmp/cyclonedds/build \
        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$CYCLONEDDS_HOME" \
@@ -35,7 +35,7 @@ RUN git init /opt/unitree_sdk2_python \
     && git -C /opt/unitree_sdk2_python fetch --depth 1 https://github.com/unitreerobotics/unitree_sdk2_python.git "$UNITREE_PYTHON_VERSION" \
     && git -C /opt/unitree_sdk2_python checkout --detach FETCH_HEAD \
     && python3 -m venv /opt/venv \
-    && pip install --no-cache-dir -e /opt/unitree_sdk2_python mujoco==3.3.6
+    && pip install --no-cache-dir --no-binary=cyclonedds -e /opt/unitree_sdk2_python mujoco==3.3.6
 
 COPY --from=g1-model /tmp/unitree/unitree_robots/g1 /opt/unitree_mujoco/unitree_robots/g1
 COPY --from=g1-model /tmp/unitree/LICENSE /opt/unitree_mujoco/LICENSE
@@ -68,4 +68,8 @@ COPY --from=web-assets /opt/web-assets /opt/web-assets
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     libgl1-mesa-dri libglx-mesa0 libx11-6 libxcursor1 libxi6 libxinerama1 libxrandr2 \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM web-sim AS web-sim-mac
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     novnc websockify x11vnc xauth xvfb && rm -rf /var/lib/apt/lists/*
