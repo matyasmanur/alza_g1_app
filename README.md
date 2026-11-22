@@ -172,7 +172,38 @@ The supported-base simulation verifies arm motion and feedback. Firmware handove
 
 ### Command responsiveness
 
-The browser sends the first slider change immediately after idle and coalesces follow-up changes during a drag. Across 30 browser clicks in local Docker simulation, the time from server receipt to the first changed SDK write was **14.0 ms median / 20.4 ms p95**. Browser click to acknowledgment had a median of **50.8 ms**.
+The browser sends the first slider change immediately after idle and coalesces follow-up changes during a drag. These results come from 30 measured slider clicks in MuJoCo running in Docker on Apple Silicon.
+
+| Interval | Median | p95 |
+|---|---:|---:|
+| Browser click to command acknowledgment | 51.1 ms | 53.4 ms |
+| Server receipt to the first SDK write with a changed setpoint | 9.6 ms | 20.2 ms |
+| Server receipt to the first motion detected in DDS feedback | 118.0 ms | 130.4 ms |
+
+The benchmark alternates the left-elbow target between 6° and 18° and skips the first five clicks as warm-up. It detects motion when valid DDS feedback shows a change of at least 0.01 rad in the direction of the target. 
+
+#### Reproduce the measurement
+
+From the repository root, start the simulator with latency tracing enabled. Leave it running in the first terminal and keep the web app in **Observation** mode so the benchmark can take control.
+
+```bash
+G1_MEASURE_LATENCY=1 G1_SIM_VIEWER=0 make up web-sim
+```
+
+From the repository root in a second terminal, build and run the benchmark.
+
+```bash
+docker build -t g1-web-verification ./verification
+mkdir -p benchmark-results
+sim_container=$(docker ps -q \
+  --filter "label=com.docker.compose.project.working_dir=$PWD" \
+  --filter "label=com.docker.compose.service=web-sim")
+docker run --rm --network "container:$sim_container" \
+  --volume "$PWD/benchmark-results:/out" \
+  g1-web-verification benchmark
+```
+
+The runner prints the median and p95 in the terminal and writes the raw samples to `benchmark-results/latency.csv`.
 
 ### Reference documents
 
