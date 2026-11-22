@@ -114,13 +114,13 @@ def check_controller_motion() -> None:
     baseline = controller.status.measured.position[elbow]
     controller.take_control(operator)
     controller.enable(operator)
-    controller.set_joint(operator, "left_elbow", baseline + 0.80)
+    controller.set_joint(operator, "left_elbow", baseline - 0.80)
     deadline = monotonic() + 0.9
     while monotonic() < deadline:
         controller.heartbeat(operator)
         controller.tick()
         sleep(COMMAND_PERIOD)
-    moving = controller.status.measured.position[elbow] - baseline
+    moving = baseline - controller.status.measured.position[elbow]
     if controller.status.motion is not Motion.MANUAL or not 0.12 < moving < 0.65:
         raise RuntimeError(f"Expected elbow in motion before Stop, measured {moving:+.3f} rad")
 
@@ -131,13 +131,13 @@ def check_controller_motion() -> None:
         controller.tick()
         sleep(COMMAND_PERIOD)
     stopped = controller.status
-    change = stopped.measured.position[elbow] - baseline
+    change = baseline - stopped.measured.position[elbow]
     if (stopped.connection != "connected" or stopped.motion is not Motion.IDLE
             or not stopped.stop_latched or stopped.enabled or stopped.fault
             or not 0.12 < change < 0.70 or abs(stopped.measured.velocity[elbow]) > 0.10):
         raise RuntimeError(f"Expected a settled, latched Stop, measured {change:+.3f} rad, {stopped}")
-    print(f"Elbow displacement at Stop request: {moving:+.3f} rad")
-    print(f"Elbow displacement after Stop: {change:+.3f} rad for a +0.80 rad target")
+    print(f"Elbow travel at Stop request: {moving:.3f} rad")
+    print(f"Elbow travel after Stop: {change:.3f} rad of a 0.80 rad move")
 
 
 def main() -> None:

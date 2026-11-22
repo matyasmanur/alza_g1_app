@@ -3,7 +3,7 @@
 import unittest
 
 from g1_control.controller import Motion, MotionController, Rejected
-from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, MAX_ACCELERATION, MAX_SPEED, TARGET_MARGIN
+from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, MAX_ACCELERATION, MAX_SPEED, PARKED, TARGET_MARGIN
 from g1_control.mock import MockTransport
 from g1_control.protocol import COMMAND_PERIOD, COMMAND_TIMEOUT
 
@@ -186,6 +186,27 @@ class ControllerTests(unittest.TestCase):
         self.controller.take_control("observer")
         self.assertFalse(self.controller.status.enabled)
         self.assertIsNone(self.controller.status.target)
+
+    def test_release_parks_the_arms_before_giving_up_control(self):
+        self.advance()
+        self.controller.take_control("operator")
+        self.assertIsNone(self.controller.release("operator"))
+        self.assertIsNone(self.controller.status.owner)
+
+        self.enable()
+        self.controller.set_joint("operator", "left_elbow", 0.3)
+        with self.assertRaises(Rejected):
+            self.controller.release("operator")
+        self.advance(80)
+        request = self.controller.release("operator")
+        self.controller.finish_plan("operator", request, self.controller.plan_gesture(request))
+        with self.assertRaises(Rejected):
+            self.controller.take_control("observer")
+        self.advance(450)
+        self.assertIsNone(self.controller.status.owner)
+        self.assertFalse(self.mock.authority)
+        for measured, parked in zip(self.controller.status.measured.position, PARKED):
+            self.assertAlmostEqual(measured, parked, places=2)
 
     def test_expired_session_revokes_control(self):
         self.enable()

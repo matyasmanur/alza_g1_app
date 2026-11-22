@@ -8,6 +8,7 @@ from g1_control.clearance import MujocoClearance
 from g1_control.controller import Motion, MotionController, Rejected
 from g1_control.dds_transport import ARM_GAINS
 from g1_control.gestures import GESTURES, pose
+from g1_control.joints import PARKED
 from g1_control.protocol import ARM_START, COMMAND_PERIOD
 from g1_control.simulator import ArmPlant, DEFAULT_MODEL, load_supported_model
 from g1_control.trajectory import READY
@@ -19,8 +20,8 @@ OPERATOR = "gesture-check"
 class SimulationRun:
     """Use the live plant and arm gains while replacing DDS timing with a fixed clock."""
 
-    def __init__(self, model, clearance):
-        self.plant = ArmPlant(model)
+    def __init__(self, model, clearance, arms=READY):
+        self.plant = ArmPlant(model, arms)
         self.now = 0.0
         self.command = None
         self.dt = model.opt.timestep
@@ -67,8 +68,8 @@ class SimulationRun:
 def check_catalog(model, clearance):
     for gesture in GESTURES.values():
         try:
-            for off_ready in (False, True):
-                run = SimulationRun(model, clearance)
+            for arms, off_ready in ((PARKED, False), (READY, False), (READY, True)):
+                run = SimulationRun(model, clearance, arms)
                 if off_ready:
                     run.controller.set_joint(OPERATOR, "left_elbow", 0.24)
                     run.controller.set_joint(OPERATOR, "right_wrist_roll", -0.20)
@@ -94,7 +95,7 @@ def check_catalog(model, clearance):
             assert max(map(abs, run.read().position)) > 0.09, "Stop returned to Ready"
         except (AssertionError, ValueError) as error:
             raise AssertionError(f"{gesture.name}: {error}") from error
-        print(f"PASS {gesture.name}: Ready, off-Ready, return, Stop")
+        print(f"PASS {gesture.name}: Parked, Ready, off-Ready, return, Stop")
 
 
 def check_rejection(model, clearance):

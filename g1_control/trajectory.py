@@ -1,7 +1,7 @@
 """Bounded joint-space paths and a two-route gesture planner."""
 
 from dataclasses import dataclass
-from math import ceil, sqrt
+from math import ceil, inf, sqrt
 from typing import Callable
 
 from g1_control.joints import JOINT_NAMES, MAX_ACCELERATION, MAX_SPEED
@@ -9,7 +9,37 @@ from g1_control.transport import Angles, Feedback
 
 READY = (0.0,) * len(JOINT_NAMES)
 SAMPLE_STEP = 0.05
+MARGIN_METRES = 0.012
 Clearance = Callable[[Angles, Angles], str | None]
+
+
+class Issue(str):
+    """A clearance violation that also reports how far inside the margin the pose is, in metres."""
+
+    def __new__(cls, text: str, depth: float):
+        issue = super().__new__(cls, text)
+        issue.depth = depth
+        return issue
+
+
+class Escape:
+    """Tolerate poses inside the clearance margin only while they keep moving out of it.
+
+    Measured poses sag into the margin, and a pose that may not move away can never recover.
+    """
+
+    def __init__(self, slack: float = 0.0005) -> None:
+        self._slack = slack
+        self._depth = inf
+
+    def blocks(self, issue: str | None) -> bool:
+        """Report a pose deeper inside the margin than the shallowest pose before it."""
+        if issue and not hasattr(issue, "depth"):
+            return True
+        depth = issue.depth if issue else 0.0
+        blocked = depth > self._depth + self._slack
+        self._depth = min(self._depth, depth)
+        return blocked
 
 
 @dataclass(frozen=True)
@@ -53,6 +83,8 @@ class PlanRequest:
     feedback: Feedback
     commanded: Angles
     frames: tuple[Keyframe, ...]
+    end: Angles = READY
+    release: bool = False
 
 
 class UnsafePath(ValueError):
@@ -60,22 +92,47 @@ class UnsafePath(ValueError):
 
 
 def path_issue(clearance: Clearance, start: Angles, end: Angles, lower: Angles) -> str | None:
-    """Sample a straight joint-space segment, including both endpoints."""
+    """Sample a straight joint-space segment. It may leave the margin but must end clear of it."""
     parts = max(1, ceil(max(abs(a - b) for a, b in zip(start, end)) / SAMPLE_STEP))
+    escape = Escape()
     for index in range(parts + 1):
         fraction = index / parts
         pose = tuple(a + (b - a)*fraction for a, b in zip(start, end))
         issue = clearance(pose, lower)
-        if issue:
+        if escape.blocks(issue) or (issue and index == parts):
             return issue
     return None
 
 
+def unwind(clearance: Clearance, start: Angles, lower: Angles) -> tuple[Keyframe, ...]:
+    """Reach Ready one joint at a time, taking any joint whose own path is clear."""
+    pose = list(start)
+    frames = []
+    moved = True
+    while moved:
+        moved = False
+        for index, angle in enumerate(pose):
+            step = pose[:index] + [READY[index]] + pose[index + 1:]
+            if abs(angle - READY[index]) > 0.01 and not path_issue(clearance, tuple(pose), tuple(step), lower):
+                pose = step
+                frames.append(Keyframe(tuple(pose), 0.35))
+                moved = True
+    return tuple(frames) if max(abs(a - b) for a, b in zip(pose, READY)) <= 0.01 else ()
+
+
 def plan(request: PlanRequest, clearance: Clearance | None) -> tuple[Segment, ...]:
-    """Try a direct route, then via Ready, and check the full return path."""
+    """Try a direct route, then via Ready, then joint by joint, and check the full path."""
     ready = Keyframe(READY, 0.35)
+    tail = request.frames + (Keyframe(request.end, 0.35),)
+
+    def routes():
+        yield tail
+        yield (ready,) + tail
+        if clearance is not None:
+            yield unwind(clearance, request.commanded, request.feedback.lower_position) + (ready,) + tail
+
     reason = None
-    for frames in (request.frames + (ready,), (ready,) + request.frames + (ready,)):
+    for frames in routes():
         start = request.commanded
         result = []
         if clearance is not None:
@@ -92,4 +149,4 @@ def plan(request: PlanRequest, clearance: Clearance | None) -> tuple[Segment, ..
             start = frame.pose
         else:
             return tuple(result)
-    raise UnsafePath(f"No clear route to complete the gesture. {reason}")
+    raise UnsafePath(f"No clear route for {request.name}. {reason}")
