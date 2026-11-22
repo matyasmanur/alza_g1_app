@@ -5,13 +5,16 @@ const DEG = 180 / Math.PI;
 const rows = [];
 const pending = new Map();
 const commands = new Map();
-const featured = { wave: "👋", "high-five": "🖐️", handshake: "🤝" };
+const featured = { "recorded-face-wave": "👋", "recorded-high-five": "🖐️", "recorded-handshake": "🤝" };
 const clock = () => new Date().toLocaleTimeString("en-GB");
 let socket, state, viewer;
 let nextId = 0;
 let side = "left";
 let backendLabel = "";
 let readOnly = false;
+let recording = false;
+let recordedPoses = 0;
+let recorderPending = false;
 let lastStateAt = 0;
 let lastHeartbeat = 0;
 let nextSliderWrite = 0;
@@ -118,27 +121,34 @@ function playGesture(gesture) {
   send("gesture", { gesture });
 }
 
-function addGestures(gestures) {
-  const groups = ["Unitree-inspired", "Original"].map(label => {
-    const group = document.createElement("optgroup");
-    group.label = label;
-    $("gesture-select").append(group);
-    return group;
-  });
-  for (const gesture of gestures) {
-    const option = new Option(gesture.name, gesture.id);
-    groups[gesture.sdk_id === null ? 1 : 0].append(option);
-    if (featured[gesture.id]) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "secondary";
-      button.innerHTML = `<span aria-hidden="true">${featured[gesture.id]}</span>`;
-      button.append(gesture.name);
-      button.dataset.gesture = gesture.name;
-      button.addEventListener("click", () => playGesture(gesture.id));
-      $("featured-gestures").append(button);
-    }
+function addGesture(gesture) {
+  const group = gesture.id.startsWith("recorded-") ? $("recorded-gestures") : $("original-gestures");
+  group.append(new Option(gesture.name, gesture.id));
+  group.hidden = false;
+  if (featured[gesture.id]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.innerHTML = `<span aria-hidden="true">${featured[gesture.id]}</span>`;
+    button.append(gesture.name);
+    button.dataset.gesture = gesture.name;
+    button.addEventListener("click", () => playGesture(gesture.id));
+    $("featured-gestures").append(button);
   }
+}
+
+function resetRecorder() {
+  recording = false;
+  recorderPending = false;
+  recordedPoses = 0;
+  $("recorded-poses").textContent = "0 poses captured";
+  $("gesture-recorder").reset();
+}
+
+function sendRecorder(action, values) {
+  recorderPending = true;
+  send(action, values);
+  render();
 }
 
 function render() {
@@ -181,6 +191,12 @@ function render() {
   }
   $("gesture-select").disabled = !canPlay;
   $("play-gesture").disabled = !canPlay || !$("gesture-select").value;
+  $("record-gesture").hidden = recording;
+  $("record-gesture").disabled = !canPlay;
+  $("gesture-recorder").hidden = !recording;
+  $("capture-pose").disabled = !canPlay || recorderPending || Boolean(pending.size);
+  $("save-recording").disabled = !owned || !recordedPoses || recorderPending;
+  $("discard-recording").disabled = recorderPending || !connected;
   if (!manual) {
     pending.clear();
     for (const row of rows) row.dragging = false;
@@ -234,6 +250,24 @@ function connect() {
     }
     const [action, sentAt] = commands.get(message.id) ?? [];
     commands.delete(message.id);
+    if (["capture_pose", "save_recording", "discard_recording"].includes(action)) {
+      recorderPending = false;
+      if (!message.ok) {
+        feedback(message.message, true);
+      } else if (action === "capture_pose") {
+        recordedPoses = message.count;
+        $("recorded-poses").textContent = `${recordedPoses} ${recordedPoses === 1 ? "pose" : "poses"} captured`;
+      } else {
+        resetRecorder();
+        if (message.gesture) {
+          addGesture(message.gesture);
+          $("gesture-select").value = message.gesture.id;
+          feedback(`Saved gesture “${message.gesture.name}”.`);
+        }
+      }
+      render();
+      return;
+    }
     // A gesture is acknowledged only after its path is planned, so it is not a transport latency.
     if (action && action !== "gesture") $("latency").textContent = `${(performance.now() - sentAt).toFixed(1)} ms`;
     if (message.ok && messages[action]) feedback(messages[action]);
@@ -247,7 +281,9 @@ function connect() {
     if (state?.pose) viewer?.showPose(state.pose, true);
     state = { pose: state?.pose, connection: "offline" };
     commands.clear();
-    feedback("Connection lost. Waiting to reconnect.", true);
+    feedback(recording ? "Connection lost. The unsaved recording was cleared." :
+      "Connection lost. Waiting to reconnect.", true);
+    resetRecorder();
     render();
     setTimeout(connect, 900);
   });
@@ -255,6 +291,19 @@ function connect() {
 
 $("gesture-select").addEventListener("change", render);
 $("play-gesture").addEventListener("click", () => playGesture($("gesture-select").value));
+$("record-gesture").addEventListener("click", () => {
+  recording = true;
+  feedback("Move the arms with the sliders, then capture each pose once the arms settle.");
+  render();
+});
+$("capture-pose").addEventListener("click", () => {
+  if (!pending.size) sendRecorder("capture_pose");
+});
+$("gesture-recorder").addEventListener("submit", event => {
+  event.preventDefault();
+  if (!$("save-recording").disabled) sendRecorder("save_recording", { name: $("gesture-name").value });
+});
+$("discard-recording").addEventListener("click", () => sendRecorder("discard_recording"));
 $("ready").addEventListener("click", () => {
   feedback("Checking the path to Ready…");
   send("ready");
@@ -304,7 +353,11 @@ try {
     $("command-status").textContent = "Hardware observation is read-only.";
   }
   joints.forEach(addRow);
-  addGestures(gestures);
+  for (const id of Object.keys(featured)) {
+    const gesture = gestures.find(gesture => gesture.id === id);
+    if (gesture) addGesture(gesture);
+  }
+  gestures.filter(gesture => !featured[gesture.id]).forEach(addGesture);
   render();
   connect();
 } catch (error) {

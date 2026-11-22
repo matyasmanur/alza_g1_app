@@ -119,7 +119,7 @@ Before accepting a new target, the backend samples the proposed motion in MuJoCo
 
 ### 5. Play a gesture
 
-Select **Alternating salute** in the gesture library and click **Play gesture**. The app checks the planned motion, plays the sequence, and returns the arms to Ready.
+Select a gesture under **Recorded** and click **Play gesture**. The app checks the planned motion, plays the sequence, and returns the arms to Ready.
 
 ![The G1 performs Alternating salute, then returns to Ready](docs/media/5-gesture-execution.gif)
 
@@ -128,6 +128,12 @@ Select **Alternating salute** in the gesture library and click **Play gesture**.
 With motion enabled and the arms settled, click **Release control**. The app moves the arms to the parked pose and returns to **Observation**.
 
 ![Releasing control parks the G1 arms and returns the app to Observation](docs/media/6-release-control.gif)
+
+## Record a gesture
+
+In simulation or mock mode, take control, enable motion, and click **Record gesture**. Move the arms with the joint sliders, wait for them to settle, then click **Capture pose**. Repeat for each pose, enter a name, and click **Save gesture**.
+
+The app saves one JSON file in `recorded_gestures/` and selects the gesture under **Recorded** in the library. Click **Play gesture** to replay it through the existing trajectory planner. The files load again when you reopen the app. Each pose stores the 14 measured arm angles in radians, in the order defined by [JOINT_NAMES](g1_control/joints.py).
 
 ## Run the SDK examples
 
@@ -141,11 +147,11 @@ Run one example at a time and watch the measured motion in the web app or the op
 
 ```bash
 python sdk_example.py
-python gesture_exec_example.py handshake
+python gesture_exec_example.py recorded-handshake
 ```
 
 - `sdk_example.py` uses the Unitree Python SDK directly to read joint feedback and publish arm commands. It bends the left elbow, then raises the arm and waves. 
-- `gesture_exec_example.py` reuses the web app's gesture library, trajectory planner, MuJoCo clearance checks, and DDS adapter built on the Unitree Python SDK. It calls the selected gesture from the terminal and streams the planned motion to MuJoCo, finishing at the parked pose. The default gesture is `wave`. Run `python gesture_exec_example.py --help` to see the available names. 
+- `gesture_exec_example.py` reuses the web app's gesture library, trajectory planner, MuJoCo clearance checks, and DDS adapter built on the Unitree Python SDK. It calls the selected gesture from the terminal and streams the planned motion to MuJoCo, finishing at the parked pose. It defaults to **Face wave** when the recording is available. Run `python gesture_exec_example.py --help` to see the available IDs.
 
 Use `Ctrl+C` in the terminal to interrupt an SDK example. **Stop motion** in the web app applies to motion issued by the web app.
 

@@ -165,6 +165,13 @@ class MotionController:
             raise Rejected(str(error)) from error
         self.finish_plan(session, request, segments)
 
+    def capture_pose(self, session: str) -> Angles:
+        """Capture the measured arms once they are stationary."""
+        self._require_enabled(session)
+        if self._motion is not Motion.IDLE or any(abs(v) > VELOCITY_TOLERANCE for v in self._feedback.velocity):
+            raise Rejected("Wait for the arms to settle before capturing a pose")
+        return tuple(checked_target(joint, angle) for joint, angle in zip(JOINT_NAMES, self._feedback.position))
+
     def prepare_gesture(self, session: str, name: str, frames: tuple[Keyframe, ...],
                         end: Angles = READY, release: bool = False) -> PlanRequest:
         """Reserve motion and capture a stationary pose before planning a route that finishes at end."""

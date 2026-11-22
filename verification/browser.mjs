@@ -87,9 +87,9 @@ async function demo() {
   await page.screenshot({ path: "/out/demo.png" });
   await text("#command-status", "Gesture complete. Arms returned to Ready.");
   await page.waitForTimeout(850);
-  await page.locator("#gesture-select").selectOption("conductor");
+  await page.locator("#gesture-select").selectOption("recorded-double-salute");
   await page.getByRole("button", { name: "Play gesture" }).click();
-  await text("#motion", "Running · Conductor");
+  await text("#motion", "Running · Double salute");
   await observeMotion("left_shoulder_pitch", -13);
   await page.getByRole("button", { name: "Stop motion" }).click();
   await text("#motion", "Stopped · Latched");

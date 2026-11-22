@@ -39,7 +39,7 @@ def main() -> None:
 
         for action in ("take_control", "enable", "set_joint", "gesture", "ready", "release_control", "stop", "reset_stop"):
             command = json.dumps({"type": action, "id": 1}), monotonic()
-            acknowledgment = handle_command(controller, "browser", command, {}, None, read_only=True)
+            acknowledgment = handle_command(controller, "browser", command, {}, None, [], read_only=True)
             assert acknowledgment == {
                 "type": "ack", "id": 1, "ok": False, "message": "Hardware observation is read-only",
             }

@@ -18,11 +18,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from g1_control.controller import Motion, MotionController, Rejected
-from g1_control.gestures import GESTURES
+from g1_control.gestures import MAX_RECORDED_POSES, load_gestures, save_recording
 from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, PARKED, TARGET_MARGIN
 from g1_control.latency import LatencyTrace
 from g1_control.protocol import COMMAND_PERIOD
 from g1_control.trajectory import PlanRequest, UnsafePath
+from g1_control.transport import Angles
 
 WEB_DIRECTORY = Path(__file__).resolve().parent / "static"
 ASSET_DIRECTORY = Path("/opt/web-assets")
@@ -60,7 +61,7 @@ async def receive_command(socket: WebSocket) -> tuple[str, float]:
 
 def handle_command(controller: MotionController, session: str, message: tuple[str, float],
                    plans: dict[asyncio.Task, tuple[int, PlanRequest]], trace: LatencyTrace | None,
-                   *, read_only: bool = False) -> dict | None:
+                   recording: list[Angles], *, read_only: bool = False) -> dict | None:
     """Apply one browser command and acknowledge it. Successful heartbeats are silent."""
     command_id = None
     try:
@@ -77,12 +78,31 @@ def handle_command(controller: MotionController, session: str, message: tuple[st
             return None
         if type(command_id) is not int:
             raise Rejected("Invalid command ID")
+        if action == "capture_pose":
+            if len(recording) >= MAX_RECORDED_POSES:
+                raise Rejected(f"Recordings can contain up to {MAX_RECORDED_POSES} poses")
+            recording.append(controller.capture_pose(session))
+            return {"type": "ack", "id": command_id, "ok": True, "count": len(recording)}
+        if action == "save_recording":
+            if controller.status.owner != session:
+                raise Rejected("Take control to save a recording")
+            try:
+                slug, gesture = save_recording(command.get("name"), recording)
+            except ValueError as error:
+                raise Rejected(str(error)) from error
+            except OSError as error:
+                raise Rejected("Could not write the gesture recording") from error
+            recording.clear()
+            return {"type": "ack", "id": command_id, "ok": True, "gesture": {"id": slug, "name": gesture.name}}
+        if action == "discard_recording":
+            recording.clear()
+            return {"type": "ack", "id": command_id, "ok": True}
         if action in ("gesture", "ready", "release_control"):
             if action == "gesture":
                 gesture_id = command.get("gesture")
-                if not isinstance(gesture_id, str) or gesture_id not in GESTURES:
+                gesture = load_gestures().get(gesture_id) if isinstance(gesture_id, str) else None
+                if gesture is None:
                     raise Rejected("Unknown gesture")
-                gesture = GESTURES[gesture_id]
                 request = controller.prepare_gesture(session, gesture.name, gesture.frames)
             elif action == "ready":
                 request = controller.prepare_gesture(session, "Ready pose", ())
@@ -199,7 +219,7 @@ def create_app(backend: str, *, dds_interface: str = "", dds_domain: int = 0) ->
             "joints": [{"name": name, "min": low + TARGET_MARGIN, "max": high - TARGET_MARGIN}
                        for name, (low, high) in JOINT_LIMITS.items()],
             "gestures": [] if read_only else [
-                {"id": slug, "name": gesture.name, "sdk_id": gesture.sdk_id} for slug, gesture in GESTURES.items()
+                {"id": slug, "name": gesture.name} for slug, gesture in load_gestures().items()
             ],
         }
 
@@ -214,6 +234,7 @@ def create_app(backend: str, *, dds_interface: str = "", dds_domain: int = 0) ->
         await socket.accept()
         incoming = asyncio.create_task(receive_command(socket))
         plans = {}
+        recording: list[Angles] = []
         loop = asyncio.get_running_loop()
         next_state = loop.time()
         try:
@@ -227,7 +248,7 @@ def create_app(backend: str, *, dds_interface: str = "", dds_domain: int = 0) ->
                                               return_when=asyncio.FIRST_COMPLETED)
                 if incoming in ready:
                     ready.remove(incoming)
-                    acknowledgment = handle_command(controller, session, incoming.result(), plans, trace,
+                    acknowledgment = handle_command(controller, session, incoming.result(), plans, trace, recording,
                                                     read_only=read_only)
                     incoming = asyncio.create_task(receive_command(socket))
                     if acknowledgment is not None:

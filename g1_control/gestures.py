@@ -1,12 +1,23 @@
-"""App-authored G1 gesture renditions and original arm sequences."""
+"""Built-in and recorded G1 arm gestures."""
 
+import json
+import logging
+import os
+import re
 from dataclasses import dataclass
 from math import degrees, radians
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from uuid import uuid4
 
-from g1_control.joints import PARKED
+from g1_control.controller import checked_target
+from g1_control.joints import JOINT_NAMES, PARKED
 from g1_control.trajectory import Keyframe
 
 REST = (0, 0, 0, 0, 0, 0, 0)
+RECORDINGS_DIR = Path(os.environ.get("G1_GESTURE_DIR", Path(__file__).resolve().parents[1] / "recorded_gestures"))
+MAX_RECORDED_POSES = 100
+logger = logging.getLogger(__name__)
 
 
 def pose(left=REST, *, right=REST, seconds=0.35) -> Keyframe:
@@ -18,23 +29,11 @@ def pose(left=REST, *, right=REST, seconds=0.35) -> Keyframe:
 
 @dataclass(frozen=True)
 class Gesture:
-    """A display name, SDK reference ID when inspired by Unitree, and keyframes."""
+    """A display name and arm keyframes."""
 
     name: str
-    sdk_id: int | None
     frames: tuple[Keyframe, ...]
 
-
-FACE_WAVE = (-32, 30, 0, -24, 0, 0, 0)
-HIGH_WAVE = (-72, 31, -5, -20, 0, 0, 0)
-HIGH_FIVE = (-48, 27, -2, -16, 0, 10, 0)
-SHAKE = (-22, 16, -5, 12, 9, 0, 0)
-KISS_IN = (-47, 26, -8, -19, 0, -14, 0)
-KISS_OUT = (-39, 29, -8, 3, 12, 3, 0)
-OPEN = (-42, 34, -10, 4, 0, 0, 0)
-CLAP = (-51, 24, -38, 31, 0, 0, 0)
-HEART = (-45, 34, -29, 0, 0, -12, 0)
-SALUTE = (-50, 25, -2, -24, 8, 0, 0)
 
 # Stroke endpoints fitted to the G1 hand meshes, with the backs angled forward.
 # From the audience's view the robot's right hand starts on the left.
@@ -64,54 +63,46 @@ ALZA_Z = (
 )
 
 GESTURES = {
-    "wave": Gesture("Face wave", 25, (
-        pose(FACE_WAVE), pose((-32, 30, 0, -24, -23, 0, 0)), pose((-32, 30, 0, -24, 24, 0, 0)),
-        pose((-32, 30, 0, -24, -20, 0, 0)), pose(FACE_WAVE),
-    )),
-    "high-five": Gesture("High five", 18, (
-        pose(right=HIGH_FIVE), pose(right=HIGH_FIVE, seconds=0.8),
-    )),
-    "handshake": Gesture("Handshake", 27, (
-        pose(right=SHAKE), pose(right=(-22, 16, -5, 3, 9, 0, 0)),
-        pose(right=(-22, 16, -5, 19, 9, 0, 0)), pose(right=SHAKE),
-    )),
-    "two-hand-kiss": Gesture("Two-hand kiss", 11, (
-        pose(KISS_IN, right=KISS_IN), pose(KISS_OUT, right=KISS_OUT),
-    )),
-    "left-kiss": Gesture("Left kiss", 12, (pose(KISS_IN), pose(KISS_OUT))),
-    "right-kiss": Gesture("Right kiss", 13, (pose(right=KISS_IN), pose(right=KISS_OUT))),
-    "hands-up": Gesture("Hands up", 15, (
-        pose(HIGH_WAVE, right=HIGH_WAVE), pose(HIGH_WAVE, right=HIGH_WAVE, seconds=0.8),
-    )),
-    "clap": Gesture("Clap", 17, (
-        pose(OPEN, right=OPEN), pose(CLAP, right=CLAP), pose(OPEN, right=OPEN), pose(CLAP, right=CLAP),
-    )),
-    "hug": Gesture("Hug", 19, (
-        pose((-45, 48, 4, 12, 0, 0, 0), right=(-45, 48, 4, 12, 0, 0, 0)),
-        pose((-42, 26, -24, 24, 0, 0, 0), right=(-42, 26, -24, 24, 0, 0, 0), seconds=0.85),
-    )),
-    "heart": Gesture("Heart", 20, (pose(HEART, right=HEART), pose(HEART, right=HEART, seconds=0.8))),
-    "right-heart": Gesture("Right heart", 21, (pose(right=HEART), pose(right=HEART, seconds=0.8))),
-    "reject": Gesture("Reject", 22, (
-        pose((-36, 33, -7, -4, -8, 16, 0)), pose((-28, 42, 5, -4, 16, 16, 0)),
-    )),
-    "right-hand-up": Gesture("Right hand up", 23, (
-        pose(right=SALUTE), pose(right=SALUTE, seconds=0.8),
-    )),
-    "x-ray": Gesture("X-ray", 24, (
-        pose((-28, 23, -38, 12, 0, 0, 0), right=(-47, 32, -28, -3, 0, 0, 0)),
-        pose((-28, 23, -38, 12, 0, 0, 0), right=(-47, 32, -28, -3, 0, 0, 0), seconds=0.7),
-    )),
-    "high-wave": Gesture("High wave", 26, (
-        pose(HIGH_WAVE), pose((-72, 31, -5, -20, -24, 0, 0)),
-        pose((-72, 31, -5, -20, 23, 0, 0)), pose(HIGH_WAVE),
-    )),
-    "conductor": Gesture("Conductor", None, (
-        pose(OPEN, right=SHAKE), pose((-34, 39, -7, -5, 0, 0, 0), right=OPEN),
-        pose(OPEN, right=(-36, 39, -7, -5, 0, 0, 0)), pose(SHAKE, right=OPEN),
-    )),
-    "alternating-salute": Gesture("Alternating salute", None, (
-        pose(SALUTE), pose(SALUTE, seconds=0.5), pose(), pose(right=SALUTE), pose(right=SALUTE, seconds=0.5),
-    )),
-    "alza": Gesture("ALZA", None, ALZA_A + ALZA_L + ALZA_Z + ALZA_A),
+    "alza": Gesture("ALZA", ALZA_A + ALZA_L + ALZA_Z + ALZA_A),
 }
+
+
+def _recorded_gesture(data: object) -> Gesture:
+    if not isinstance(data, dict):
+        raise ValueError("A gesture recording must be a JSON object")
+    name, poses = data.get("name"), data.get("poses")
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80 or not name.strip().isprintable():
+        raise ValueError("Enter a gesture name of 1 to 80 printable characters")
+    if not isinstance(poses, list) or not 1 <= len(poses) <= MAX_RECORDED_POSES:
+        raise ValueError(f"Record between 1 and {MAX_RECORDED_POSES} poses")
+    frames = []
+    for angles in poses:
+        if not isinstance(angles, (list, tuple)) or len(angles) != len(JOINT_NAMES):
+            raise ValueError(f"Each pose needs {len(JOINT_NAMES)} joint angles in radians")
+        frames.append(Keyframe(tuple(checked_target(joint, angle) for joint, angle in zip(JOINT_NAMES, angles)), 0.35))
+    return Gesture(name.strip(), tuple(frames))
+
+
+def load_gestures() -> dict[str, Gesture]:
+    """Load recordings first, followed by the built-in gestures."""
+    gestures = {}
+    for path in sorted(RECORDINGS_DIR.glob("*.json")):
+        try:
+            gestures[f"recorded-{path.stem}"] = _recorded_gesture(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, RecursionError) as error:
+            logger.warning("Skipping gesture recording %s: %s", path.name, error)
+    return gestures | GESTURES
+
+
+def save_recording(name: object, poses: list[tuple[float, ...]]) -> tuple[str, Gesture]:
+    """Publish one complete JSON file without replacing an existing recording."""
+    gesture = _recorded_gesture({"name": name, "poses": poses})
+    slug = re.sub(r"[^a-z0-9]+", "-", gesture.name.lower()).strip("-") or "gesture"
+    filename = f"{slug}-{uuid4().hex}.json"
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=RECORDINGS_DIR) as directory:
+        pending = Path(directory) / filename
+        data = {"name": gesture.name, "poses": [frame.pose for frame in gesture.frames]}
+        pending.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        pending.replace(RECORDINGS_DIR / filename)
+    return f"recorded-{Path(filename).stem}", gesture

@@ -7,7 +7,8 @@ services:
     environment:
       G1_MEASURE_LATENCY: ${G1_MEASURE_LATENCY:-0}
       G1_SIM_VIEWER: "0"
-    volumes: [".:/work:ro"]
+      G1_GESTURE_DIR: /recorded-gestures
+    volumes: [".:/work:ro", "./recorded_gestures:/recorded-gestures"]
     init: true
     command: ["python", "-B", "-m", "g1_control.web", "--backend", "sim"]
 
@@ -17,7 +18,9 @@ services:
       context: .
       target: mock
     ports: ["127.0.0.1:8000:8000"]
-    volumes: [".:/work:ro"]
+    environment:
+      G1_GESTURE_DIR: /recorded-gestures
+    volumes: [".:/work:ro", "./recorded_gestures:/recorded-gestures"]
     init: true
     command: ["python", "-B", "-m", "g1_control.web", "--backend", "mock"]
 

@@ -3,7 +3,7 @@
 import argparse
 from time import monotonic, sleep
 
-from g1_control.gestures import GESTURES
+from g1_control.gestures import load_gestures
 from g1_control.joints import PARKED
 from g1_control.protocol import COMMAND_PERIOD, COMMAND_TIMEOUT
 from g1_control.trajectory import PlanRequest, UnsafePath, plan
@@ -12,13 +12,15 @@ from g1_control.clearance import MujocoClearance
 from g1_control.dds_transport import DdsTransport
 
 def main() -> None:
+    gestures = load_gestures()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("gesture", nargs="?", default="wave", choices=GESTURES)
+    default = "recorded-face-wave" if "recorded-face-wave" in gestures else "alza"
+    parser.add_argument("gesture", nargs="?", default=default, choices=gestures)
     args = parser.parse_args()
 
 
 
-    gesture = GESTURES[args.gesture]
+    gesture = gestures[args.gesture]
     clearance = MujocoClearance()
     transport = DdsTransport()
     deadline = monotonic() + 5

@@ -7,7 +7,7 @@ import numpy as np
 from g1_control.clearance import MujocoClearance
 from g1_control.controller import Motion, MotionController, Rejected
 from g1_control.dds_transport import ARM_GAINS
-from g1_control.gestures import GESTURES, pose
+from g1_control.gestures import load_gestures, pose
 from g1_control.joints import PARKED
 from g1_control.protocol import ARM_START, COMMAND_PERIOD
 from g1_control.simulator import ArmPlant, DEFAULT_MODEL, load_supported_model
@@ -67,7 +67,7 @@ class SimulationRun:
 
 
 def check_catalog(model, clearance):
-    for gesture in GESTURES.values():
+    for gesture in load_gestures().values():
         try:
             for arms, off_ready in ((PARKED, False), (READY, False), (READY, True)):
                 run = SimulationRun(model, clearance, arms)

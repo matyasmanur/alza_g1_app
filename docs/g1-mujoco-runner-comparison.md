@@ -88,6 +88,6 @@ The map also lists **Release arm** (ID `99`), which releases an arm action. [C++
 
 ### How the web app plays gestures
 
-The web app uses its own keyframes. Selecting **Face wave**, for example, plans a trajectory from the local catalog and streams the resulting joint targets as `LowCmd_` messages on `rt/arm_sdk`. The catalog's factory ID is metadata. If a physical G1 is available, recording `rt/lowstate` during a factory action and replaying the measured joint positions as setpoints can approximate that particular run. 
+The web app plays recorded poses and the built-in **ALZA** gesture. Selecting **Face wave**, for example, plans a trajectory from the saved poses and streams the resulting joint targets as `LowCmd_` messages on `rt/arm_sdk`. If a physical G1 is available, recording `rt/lowstate` during a factory action and replaying the measured joint positions as setpoints can approximate that particular run.
 
 For differences between the hardware SDKs, see the [C++ and Python SDK2 comparison](unitree_g1_sdk2_comparison.md).

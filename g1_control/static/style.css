@@ -165,6 +165,9 @@ body[data-mode="offline"] .viewport canvas { filter: grayscale(1) brightness(.6)
   font-size: .875rem;
 }
 .gesture-selection select:disabled { opacity: .45; }
+#gesture-recorder { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
+#gesture-name { min-width: 10ch; flex: 1; padding: 8px; color: inherit; background: var(--raised); border: 1px solid var(--line); border-radius: 6px; }
+#recorded-poses { color: var(--muted); font-size: .85rem; }
 
 .units { font-size: .8rem; color: var(--muted); }
 .units[data-tone="busy"] { color: var(--violet); font-weight: 650; }

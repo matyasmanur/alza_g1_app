@@ -7,7 +7,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%235b9dff'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='monospace' font-weight='700' font-size='15' fill='%2306101f'%3EG1%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <script type="importmap">{"imports":{"three":"/assets/vendor/three.module.min.js"}}</script>
-  <script type="module" src="/static/app.js?v=3"></script>
+  <script type="module" src="/static/app.js?v=5"></script>
 </head>
 <body data-mode="offline">
   <header class="topbar">
@@ -34,9 +34,20 @@
         <div class="gesture-selection">
           <select id="gesture-select" aria-label="Gesture library" disabled>
             <option value="">Gesture library</option>
+            <optgroup id="recorded-gestures" label="Recorded" hidden></optgroup>
+            <optgroup id="original-gestures" label="Original"></optgroup>
           </select>
           <button id="play-gesture" class="primary" type="button" disabled>Play gesture</button>
         </div>
+        <button id="record-gesture" class="secondary" type="button" disabled>Record gesture</button>
+        <form id="gesture-recorder" hidden>
+          <label for="gesture-name">Gesture name</label>
+          <input id="gesture-name" required maxlength="80" autocomplete="off">
+          <button id="capture-pose" class="secondary" type="button">Capture pose</button>
+          <span id="recorded-poses" role="status">0 poses captured</span>
+          <button id="save-recording" class="primary" type="submit" disabled>Save gesture</button>
+          <button id="discard-recording" class="secondary" type="button">Discard</button>
+        </form>
       </section>
       <section class="card robot" aria-label="Robot view">
         <div id="viewport" class="viewport" aria-label="Interactive 3D view of the Unitree G1">
