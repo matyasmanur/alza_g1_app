@@ -5,7 +5,8 @@ const DEG = 180 / Math.PI;
 const rows = [];
 const pending = new Map();
 const commands = new Map();
-const featured = ["wave", "high-five", "handshake"];
+const featured = { wave: "👋", "high-five": "🖐️", handshake: "🤝" };
+const clock = () => new Date().toLocaleTimeString("en-GB");
 let socket, state, viewer;
 let modelError = false;
 let nextId = 0;
@@ -26,14 +27,24 @@ const messages = {
 
 function feedback(text, error = false) {
   const status = $("command-status");
-  if (status.textContent !== text) status.textContent = text;
+  if (status.textContent !== text) {
+    const earlier = document.createElement("li");
+    earlier.textContent = status.textContent;
+    earlier.dataset.time = status.dataset.time;
+    earlier.dataset.tone = status.dataset.tone;
+    $("log").prepend(earlier);
+    $("log").children[4]?.remove();
+    status.textContent = text;
+    status.dataset.time = clock();
+  }
   status.dataset.tone = error ? "danger" : "neutral";
 }
+$("command-status").dataset.time = clock();
 
 function send(type, values = {}) {
   if (socket?.readyState !== WebSocket.OPEN) return;
   const id = ++nextId;
-  if (type !== "heartbeat") commands.set(id, type);
+  if (type !== "heartbeat") commands.set(id, [type, performance.now()]);
   socket.send(JSON.stringify({ type, id, ...values }));
 }
 
@@ -62,7 +73,7 @@ function flushTargets() {
 function addRow(joint, index) {
   const root = document.createElement("div");
   root.className = "joint";
-  root.innerHTML = `<div><label></label><input type="range" step="0.1" disabled></div>
+  root.innerHTML = `<div class="slider"><div><label></label><small></small></div><input type="range" step="0.1" disabled></div>
     <span class="angle target">—</span><span class="angle measured">—</span>`;
   const label = root.querySelector("label");
   const slider = root.querySelector("input");
@@ -74,6 +85,10 @@ function addRow(joint, index) {
   slider.min = Math.ceil(joint.min * DEG * 10) / 10;
   slider.max = Math.floor(joint.max * DEG * 10) / 10;
   slider.value = 0;
+  root.querySelector("small").textContent = `${slider.min}° … ${slider.max}°`;
+  for (const [event, name] of [["pointerenter", joint.name], ["pointerleave"], ["focusin", joint.name], ["focusout"]]) {
+    root.addEventListener(event, () => viewer?.highlight(name));
+  }
   const row = { root, arm, slider, target: root.querySelector(".target"),
     measured: root.querySelector(".measured"), dragging: false, lastEdit: -Infinity };
   slider.addEventListener("pointerdown", () => { row.dragging = true; });
@@ -107,11 +122,13 @@ function addGestures(gestures) {
   for (const gesture of gestures) {
     const option = new Option(gesture.name, gesture.id);
     groups[gesture.sdk_id === null ? 1 : 0].append(option);
-    if (featured.includes(gesture.id)) {
+    if (featured[gesture.id]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "secondary";
-      button.textContent = gesture.name;
+      button.innerHTML = `<span aria-hidden="true">${featured[gesture.id]}</span>`;
+      button.append(gesture.name);
+      button.dataset.gesture = gesture.name;
       button.addEventListener("click", () => playGesture(gesture.id));
       $("featured-gestures").append(button);
     }
@@ -133,14 +150,26 @@ function render() {
   $("motion").textContent = stopping ? "Stopping" : latched ? "Stopped · Latched" :
     { manual: "Manual motion", planning: `Planning · ${state?.gesture}`,
       gesture: `Running · ${state?.gesture}`, idle: "Idle" }[state?.motion ?? "idle"];
-  $("motion").dataset.tone = (latched || stopping) ? "danger" : manual || busy ? "active" : "neutral";
+  $("motion").dataset.tone = (latched || stopping) ? "danger" : busy ? "busy" : manual ? "active" : "neutral";
+  $("ownership").dataset.tone = owned ? "good" : "neutral";
+  document.body.dataset.mode = !connected ? "offline" : latched || stopping ? "stopped" :
+    busy ? "gesture" : manual ? "manual" : "idle";
+  $("lock").textContent = busy ? "Locked · gesture running" : "Degrees";
+  $("lock").dataset.tone = busy ? "busy" : "neutral";
+  const step = !owned ? 0 : state.enabled ? 2 : 1;
+  [...$("steps").children].forEach((item, index) => {
+    item.dataset.state = index < step ? "done" : index === step && connected ? "current" : "";
+  });
   $("take-control").hidden = Boolean(owned);
   $("take-control").disabled = !connected || state.control_taken || stopping;
   $("enable").hidden = !owned || state.enabled || latched || stopping;
   $("reset-stop").hidden = !owned || !latched || stopping;
   $("release-control").hidden = !owned;
   $("stop").disabled = !owned || latched;
-  for (const button of $("featured-gestures").children) button.disabled = !canPlay;
+  for (const button of $("featured-gestures").children) {
+    button.disabled = !canPlay;
+    button.toggleAttribute("data-active", busy && state.gesture === button.dataset.gesture);
+  }
   $("gesture-select").disabled = !canPlay;
   $("play-gesture").disabled = !canPlay || !$("gesture-select").value;
   if (!manual) {
@@ -158,6 +187,9 @@ function render() {
       row.slider.value = ((target ?? measured ?? 0) * DEG).toFixed(1);
     }
     row.measured.textContent = angleText(measured);
+    const { min, max } = row.slider;
+    row.root.toggleAttribute("data-live", Number.isFinite(measured));
+    row.root.style.setProperty("--measured", Math.min(1, Math.max(0, (measured * DEG - min) / (max - min))));
   }
   if (viewer && !modelError) {
     $("model-status").textContent = connected ? "Live feedback" : state?.pose ? "Last measured pose" : "Waiting for feedback";
@@ -185,8 +217,10 @@ function connect() {
       render();
       return;
     }
-    const action = commands.get(message.id);
+    const [action, sentAt] = commands.get(message.id) ?? [];
     commands.delete(message.id);
+    // A gesture is acknowledged only after its path is planned, so it is not a transport latency.
+    if (action && action !== "gesture") $("latency").textContent = `${(performance.now() - sentAt).toFixed(1)} ms`;
     if (message.ok && action) feedback(messages[action]);
     if (!message.ok && action) {
       if (action === "gesture" && message.message === "Gesture planning was cancelled") return;
@@ -224,6 +258,9 @@ for (const [id, command] of Object.entries({
     send(command);
   });
 }
+addEventListener("keydown", event => {
+  if (event.key === "Escape" && !$("stop").disabled) $("stop").click();
+});
 setInterval(() => {
   if (socket?.readyState === WebSocket.OPEN && performance.now() - lastStateAt > 900) {
     socket.close();
