@@ -27,21 +27,22 @@
   </header>
   <main>
     <div class="stage">
-      <section class="card robot" aria-label="Robot view">
-        <div id="viewport" class="viewport" aria-label="Interactive 3D view of the Unitree G1">
-          <span id="model-status" class="view-status">Loading G1 model</span>
-          <button id="reset-camera" class="secondary small view-action" type="button" disabled>Reset camera</button>
-          <span class="view-hint">Measured pose · Drag to orbit · Scroll to zoom</span>
-        </div>
-      </section>
       <section class="card gestures" aria-labelledby="gestures-title">
         <h2 id="gestures-title">Gestures</h2>
+        <button id="ready" class="primary" type="button" disabled title="Return both arms to the Ready pose along a checked path">Ready pose</button>
         <div id="featured-gestures" class="featured-gestures"></div>
         <div class="gesture-selection">
           <select id="gesture-select" aria-label="Gesture library" disabled>
             <option value="">Gesture library</option>
           </select>
           <button id="play-gesture" class="primary" type="button" disabled>Play gesture</button>
+        </div>
+      </section>
+      <section class="card robot" aria-label="Robot view">
+        <div id="viewport" class="viewport" aria-label="Interactive 3D view of the Unitree G1">
+          <span id="model-status" class="view-status">Loading G1 model</span>
+          <button id="reset-camera" class="secondary small view-action" type="button" disabled>Reset camera</button>
+          <span class="view-hint">Measured pose · Blue ghost = target · Drag to orbit · Scroll to zoom</span>
         </div>
       </section>
     </div>

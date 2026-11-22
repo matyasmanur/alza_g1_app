@@ -22,45 +22,58 @@ export async function createViewer(container) {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0c1524);
   scene.fog = new THREE.Fog(0x0c1524, 4, 11);
-  const pivots = new Map();
+  const links = new Map();
+  const ghostMaterial = new THREE.MeshBasicMaterial({ color: 0x5b9dff, transparent: true, opacity: 0.32, depthWrite: false });
 
-  // Each hinge rotates around an anchor expressed in its owning body's frame.
-  function makeBody(body) {
-    const frame = new THREE.Group();
-    transform(frame, body.position, body.quaternion);
-    let content = frame;
-    if (body.hinge) {
-      const { name, position, axis } = body.hinge;
-      const pivot = new THREE.Group();
-      pivot.position.fromArray(position);
-      content = new THREE.Group();
-      content.position.copy(pivot.position).negate();
-      frame.add(pivot);
-      pivot.add(content);
-      pivots.set(name, { pivot, axis: new THREE.Vector3(...axis).normalize(), materials: [] });
+  // The ghost is a second copy of the arms only, posed at the commanded target.
+  function makeRobot(ghost) {
+    const pivots = new Map();
+
+    // Each hinge rotates around an anchor expressed in its owning body's frame.
+    function makeBody(body, arm) {
+      arm ||= Boolean(body.hinge?.name.includes("shoulder_pitch"));
+      const frame = new THREE.Group();
+      transform(frame, body.position, body.quaternion);
+      let content = frame;
+      if (body.hinge) {
+        const { name, position, axis } = body.hinge;
+        const pivot = new THREE.Group();
+        pivot.position.fromArray(position);
+        content = new THREE.Group();
+        content.position.copy(pivot.position).negate();
+        frame.add(pivot);
+        pivot.add(content);
+        pivots.set(name, { pivot, axis: new THREE.Vector3(...axis).normalize() });
+      }
+      const materials = [];
+      for (const visual of ghost && !arm ? [] : body.visuals) {
+        const material = ghost ? ghostMaterial : new THREE.MeshStandardMaterial({
+          color: new THREE.Color(...visual.color), roughness: 0.62, metalness: 0.22,
+        });
+        const mesh = new THREE.Mesh(geometry.get(visual.mesh), material);
+        mesh.castShadow = !ghost;
+        materials.push(material);
+        transform(mesh, visual.position, visual.quaternion);
+        content.add(mesh);
+      }
+      if (!ghost) links.set(body.name.replace(/_link$/, ""), materials);
+      for (const child of body.children) content.add(makeBody(child, arm));
+      return frame;
     }
-    for (const visual of body.visuals) {
-      const material = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(...visual.color), roughness: 0.62, metalness: 0.22,
-      });
-      const mesh = new THREE.Mesh(geometry.get(visual.mesh), material);
-      mesh.castShadow = true;
-      if (body.hinge) pivots.get(body.hinge.name).materials.push(material);
-      transform(mesh, visual.position, visual.quaternion);
-      content.add(mesh);
+
+    const robot = new THREE.Group();
+    robot.rotation.x = -Math.PI / 2;
+    robot.add(makeBody(root, false));
+    scene.add(robot);
+    if (joints.length !== 29 || joints.some(name => !pivots.has(name))) {
+      throw new Error("G1 model does not match the DDS joint ordering");
     }
-    for (const child of body.children) content.add(makeBody(child));
-    return frame;
+    return { robot, rig: joints.map(name => pivots.get(name)) };
   }
 
-  const robot = new THREE.Group();
-  robot.rotation.x = -Math.PI / 2;
-  robot.add(makeBody(root));
-  scene.add(robot);
-  if (joints.length !== 29 || joints.some(name => !pivots.has(name))) {
-    throw new Error("G1 model does not match the DDS joint ordering");
-  }
-  const rig = joints.map(name => pivots.get(name));
+  const { rig } = makeRobot(false);
+  const ghost = makeRobot(true);
+  ghost.robot.visible = false;
 
   const grid = new THREE.GridHelper(12, 48, 0x34496a, 0x1d2c44);
   grid.position.y = -0.012;
@@ -101,6 +114,8 @@ export async function createViewer(container) {
     renderer.setSize(width, height, false);
   }).observe(container);
 
+  const glow = { hover: [], clash: [] };
+  let goal = null;
   let target = Array(joints.length).fill(0);
   let displayed = target.slice();
   let lastFrame = performance.now();
@@ -111,18 +126,33 @@ export async function createViewer(container) {
       displayed[index] += (target[index] - displayed[index]) * step;
       pivot.quaternion.setFromAxisAngle(axis, displayed[index]);
     });
+    // Arm joints are the last entries of the pose. Hide the ghost once the arms have arrived.
+    const first = joints.length - (goal?.length ?? 0);
+    ghost.robot.visible = Boolean(goal?.some((angle, index) => Math.abs(angle - displayed[first + index]) > 0.08));
+    if (ghost.robot.visible) {
+      ghost.rig.forEach(({ pivot, axis }, index) => {
+        pivot.quaternion.setFromAxisAngle(axis, index < first ? displayed[index] : goal[index - first]);
+      });
+    }
     controls.update();
     renderer.render(scene, camera);
   });
 
   return {
     resetCamera: () => controls.reset(),
-    highlight(name) {
-      for (const [joint, { materials }] of pivots) {
-        for (const material of materials) material.emissive.setHex(joint === name ? 0x2f6fe0 : 0);
+    highlight(kind, names) {
+      glow[kind] = names;
+      for (const [name, materials] of links) {
+        const lit = glow.hover.includes(name) || glow.clash.includes(name);
+        for (const material of materials) {
+          material.userData.color ??= material.color.getHex();
+          material.color.setHex(lit ? 0xff2b2b : material.userData.color);
+          material.emissive.setHex(lit ? 0xb00000 : 0);
+        }
       }
     },
-    showPose(angles, immediate = false) {
+    showPose(angles, immediate = false, armTarget = null) {
+      goal = armTarget;
       if (!angles || angles.length !== joints.length) return;
       target = angles;
       if (immediate) displayed = target.slice();

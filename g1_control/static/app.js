@@ -11,7 +11,9 @@ let socket, state, viewer;
 let modelError = false;
 let nextId = 0;
 let side = "left";
+let backendLabel = "";
 let lastStateAt = 0;
+let lastHeartbeat = 0;
 let nextSliderWrite = 0;
 let sliderTimer = null;
 
@@ -20,9 +22,10 @@ const messages = {
   enable: "Motion enabled. Adjust an arm joint.",
   set_joint: "Joint target accepted.",
   gesture: "Gesture started.",
+  ready: "Moving to the Ready pose.",
+  release_control: "Releasing control.",
   stop: "Stop requested. Waiting for the arms to settle.",
   reset_stop: "Stop reset. Motion is disabled.",
-  release_control: "Control released.",
 };
 
 function feedback(text, error = false) {
@@ -36,6 +39,9 @@ function feedback(text, error = false) {
     $("log").children[4]?.remove();
     status.textContent = text;
     status.dataset.time = clock();
+    // shortcut: colliding links are read from the clearance message; send them as a field if its wording changes.
+    const clash = text.match(/between (.+) and (.+?)\./);
+    viewer?.highlight("clash", clash ? clash.slice(1).map(name => name.replaceAll(" ", "_")) : []);
   }
   status.dataset.tone = error ? "danger" : "neutral";
 }
@@ -86,8 +92,8 @@ function addRow(joint, index) {
   slider.max = Math.floor(joint.max * DEG * 10) / 10;
   slider.value = 0;
   root.querySelector("small").textContent = `${slider.min}° … ${slider.max}°`;
-  for (const [event, name] of [["pointerenter", joint.name], ["pointerleave"], ["focusin", joint.name], ["focusout"]]) {
-    root.addEventListener(event, () => viewer?.highlight(name));
+  for (const [event, names] of [["pointerenter", [joint.name]], ["pointerleave", []], ["focusin", [joint.name]], ["focusout", []]]) {
+    root.addEventListener(event, () => viewer?.highlight("hover", names));
   }
   const row = { root, arm, slider, target: root.querySelector(".target"),
     measured: root.querySelector(".measured"), dragging: false, lastEdit: -Infinity };
@@ -143,7 +149,8 @@ function render() {
   const manual = connected && state.owned && state.enabled && !busy;
   const canPlay = manual && state.motion === "idle";
   const owned = connected && state.owned;
-  $("connection").textContent = { connected: "Connected", waiting: "Waiting for feedback", stale: "Stale feedback", offline: "Offline" }[connection];
+  const label = { connected: "Connected", waiting: "Waiting for feedback", stale: "Stale feedback", offline: "Offline" }[connection];
+  $("connection").textContent = [label, backendLabel].filter(Boolean).join(" · ");
   $("connection").dataset.tone = connected ? "good" : connection === "waiting" ? "neutral" : "danger";
   $("ownership").textContent = owned ? "You have control" : state?.control_taken ? "Another operator" : "Observation";
   const latched = state?.stop_latched;
@@ -166,6 +173,7 @@ function render() {
   $("reset-stop").hidden = !owned || !latched || stopping;
   $("release-control").hidden = !owned;
   $("stop").disabled = !owned || latched;
+  $("ready").disabled = !canPlay;
   for (const button of $("featured-gestures").children) {
     button.disabled = !canPlay;
     button.toggleAttribute("data-active", busy && state.gesture === button.dataset.gesture);
@@ -205,7 +213,12 @@ function connect() {
       lastStateAt = performance.now();
       const previous = state;
       state = message;
-      viewer?.showPose(state.pose, previous?.connection !== "connected" || state.connection !== "connected");
+      // Browsers throttle timers in background tabs, so the lease is renewed from state packets instead.
+      if (state.owned && lastStateAt - lastHeartbeat > 300) {
+        lastHeartbeat = lastStateAt;
+        send("heartbeat");
+      }
+      viewer?.showPose(state.pose, previous?.connection !== "connected" || state.connection !== "connected", state.target);
       if (state.fault && state.fault !== previous?.fault) feedback(state.fault, true);
       if (state.stop_latched && state.motion === "idle" && previous?.motion === "stopping") {
         feedback("Motion stopped. Reset Stop before enabling again.");
@@ -221,9 +234,9 @@ function connect() {
     commands.delete(message.id);
     // A gesture is acknowledged only after its path is planned, so it is not a transport latency.
     if (action && action !== "gesture") $("latency").textContent = `${(performance.now() - sentAt).toFixed(1)} ms`;
-    if (message.ok && action) feedback(messages[action]);
+    if (message.ok && messages[action]) feedback(messages[action]);
     if (!message.ok && action) {
-      if (action === "gesture" && message.message === "Gesture planning was cancelled") return;
+      if (message.message === "Gesture planning was cancelled") return;
       if (action === "set_joint") rows.forEach(row => { row.lastEdit = -Infinity; });
       feedback(message.message, true);
     }
@@ -240,6 +253,10 @@ function connect() {
 
 $("gesture-select").addEventListener("change", render);
 $("play-gesture").addEventListener("click", () => playGesture($("gesture-select").value));
+$("ready").addEventListener("click", () => {
+  feedback("Checking the path to Ready…");
+  send("ready");
+});
 for (const button of document.querySelectorAll("[data-side]")) {
   button.addEventListener("click", () => {
     side = button.dataset.side;
@@ -264,9 +281,7 @@ addEventListener("keydown", event => {
 setInterval(() => {
   if (socket?.readyState === WebSocket.OPEN && performance.now() - lastStateAt > 900) {
     socket.close();
-    return;
   }
-  if (state?.owned) send("heartbeat");
 }, 300);
 
 try {
@@ -274,6 +289,7 @@ try {
   if (!config.ok) throw new Error("Configuration unavailable");
   const { backend, joints, gestures } = await config.json();
   $("backend").textContent = backend === "sim" ? "MuJoCo" : "Mock";
+  backendLabel = backend === "sim" ? "SIM" : "MOCK";
   joints.forEach(addRow);
   addGestures(gestures);
   render();
