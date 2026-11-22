@@ -11,6 +11,7 @@ let socket, state, viewer;
 let nextId = 0;
 let side = "left";
 let backendLabel = "";
+let readOnly = false;
 let lastStateAt = 0;
 let lastHeartbeat = 0;
 let nextSliderWrite = 0;
@@ -145,13 +146,14 @@ function render() {
   const connected = connection === "connected";
   const stopping = state?.motion === "stopping";
   const busy = ["planning", "gesture"].includes(state?.motion);
-  const manual = connected && state.owned && state.enabled && !busy;
+  const manual = !readOnly && connected && state.owned && state.enabled && !busy;
   const canPlay = manual && state.motion === "idle";
   const owned = connected && state.owned;
   const label = { connected: "Connected", waiting: "Waiting for feedback", stale: "Stale feedback", offline: "Offline" }[connection];
   $("connection").textContent = [label, backendLabel].filter(Boolean).join(" · ");
   $("connection").dataset.tone = connected ? "good" : connection === "waiting" ? "neutral" : "danger";
-  $("ownership").textContent = owned ? "You have control" : state?.control_taken ? "Another operator" : "Observation";
+  $("ownership").textContent = readOnly ? "Read only" :
+    owned ? "You have control" : state?.control_taken ? "Another operator" : "Observation";
   const latched = state?.stop_latched;
   $("motion").textContent = stopping ? "Stopping" : latched ? "Stopped · Latched" :
     { manual: "Manual motion", planning: `Planning · ${state?.gesture}`,
@@ -167,11 +169,11 @@ function render() {
     item.dataset.state = index < step ? "done" : index === step && connected ? "current" : "";
   });
   $("take-control").hidden = Boolean(owned);
-  $("take-control").disabled = !connected || state.control_taken || stopping;
+  $("take-control").disabled = readOnly || !connected || state.control_taken || stopping;
   $("enable").hidden = !owned || state.enabled || latched || stopping;
   $("reset-stop").hidden = !owned || !latched || stopping;
   $("release-control").hidden = !owned;
-  $("stop").disabled = !owned || latched;
+  $("stop").disabled = readOnly || !owned || latched;
   $("ready").disabled = !canPlay;
   for (const button of $("featured-gestures").children) {
     button.disabled = !canPlay;
@@ -287,9 +289,20 @@ setInterval(() => {
 try {
   const config = await fetch("/config");
   if (!config.ok) throw new Error("Configuration unavailable");
-  const { backend, joints, gestures } = await config.json();
-  $("backend").textContent = backend === "sim" ? "MuJoCo" : "Mock";
-  backendLabel = backend === "sim" ? "SIM" : "MOCK";
+  const { backend, read_only, joints, gestures } = await config.json();
+  readOnly = read_only;
+  $("backend").textContent = { sim: "MuJoCo", mock: "Mock", hardware: "Physical G1" }[backend];
+  backendLabel = { sim: "SIM", mock: "MOCK", hardware: "HARDWARE" }[backend];
+  if (readOnly) {
+    document.body.classList.add("observation-only");
+    $("motion").parentElement.hidden = true;
+    $("latency").parentElement.hidden = true;
+    $("steps").closest(".session").hidden = true;
+    $("gestures-title").closest(".gestures").hidden = true;
+    $("stop").hidden = true;
+    document.querySelector(".view-hint").textContent = "Measured pose · Drag to orbit · Scroll to zoom";
+    $("command-status").textContent = "Hardware observation is read-only.";
+  }
   joints.forEach(addRow);
   addGestures(gestures);
   render();

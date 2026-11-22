@@ -68,6 +68,7 @@ h1 { font-size: 1.15rem; letter-spacing: -.02em; line-height: 1.2; }
   border: 1px solid var(--line);
   border-radius: 10px;
 }
+.observation-only .status { grid-template-columns: 1fr 1fr; }
 .status div { padding: 7px 16px; min-width: 0; }
 .status div + div { border-left: 1px solid var(--line); }
 .status span { display: block; color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }

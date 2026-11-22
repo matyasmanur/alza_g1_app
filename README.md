@@ -2,7 +2,7 @@
 
 Use the web app to try arm motions and gestures for a 29-DoF Unitree G1. You can set the target angle of each of its 14 arm joints, play gestures such as a wave or handshake, and compare the commanded and measured poses in a live 3D view.
 
-The Python backend supports two modes. Simulation mode uses the Unitree Python SDK to exchange commands and joint feedback with MuJoCo over DDS. Mock mode uses the same backend interface with an in-process Python mock.
+Simulation mode uses the Unitree Python SDK to exchange commands and joint feedback with MuJoCo over DDS. Mock mode uses an in-process Python mock. Hardware mode displays measured joint positions from a physical G1 over DDS.
 
 ## Requirements
 
@@ -69,7 +69,27 @@ http://127.0.0.1:8000
 
 Press `Ctrl+C` to stop the foreground run. Use `make down` to remove the app's containers.
 
-## Simulation demos
+### Physical G1 
+
+Hardware mode stays read-only for the entire session. Take control and arm motion are unavailable in `web-hw`.
+
+**Test status.** Hardware mode was not verified with real G1.
+
+On a Linux PC running Docker Engine, connect the G1 over Ethernet. Set the PC's robot-facing interface to an unused address on the robot's subnet, such as `192.168.123.99/24` on the default G1 network. Use the interface name shown by `ip -br addr`. [Unitree networking guide](https://github.com/unitreerobotics/xr_teleoperate/wiki/CycloneDDS-and-UnitreeSDK-%28en%29#42-unitree-robot-development)
+
+```bash
+G1_DDS_INTERFACE=enp2s0 make up web-hw
+```
+
+Open the web app on the Linux PC.
+
+```bash
+http://127.0.0.1:8002
+```
+
+**Connected · HARDWARE** indicates fresh DDS feedback. The 3D model and joint readouts follow the physical robot. Hardware mode uses DDS domain `0` by default. Set `G1_DDS_DOMAIN` if your G1 is configured for another domain.
+
+## Webapp Examples 
 
 All six recordings use simulation mode.
 

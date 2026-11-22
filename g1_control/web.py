@@ -8,6 +8,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from socket import if_nametoindex
 from time import monotonic
 from uuid import uuid4
 
@@ -26,7 +27,8 @@ from g1_control.trajectory import PlanRequest, UnsafePath
 WEB_DIRECTORY = Path(__file__).resolve().parent / "static"
 ASSET_DIRECTORY = Path("/opt/web-assets")
 STATE_PERIOD = 0.04
-LOCAL_HOSTS = {f"{host}:{port}" for host in ("localhost", "127.0.0.1") for port in (8000, 8001)}
+HARDWARE_PORT = 8002
+LOCAL_HOSTS = {f"{host}:{port}" for host in ("localhost", "127.0.0.1") for port in (8000, 8001, HARDWARE_PORT)}
 
 
 async def run_controller(controller: MotionController) -> None:
@@ -57,7 +59,8 @@ async def receive_command(socket: WebSocket) -> tuple[str, float]:
 
 
 def handle_command(controller: MotionController, session: str, message: tuple[str, float],
-                   plans: dict[asyncio.Task, tuple[int, PlanRequest]], trace: LatencyTrace | None) -> dict | None:
+                   plans: dict[asyncio.Task, tuple[int, PlanRequest]], trace: LatencyTrace | None,
+                   *, read_only: bool = False) -> dict | None:
     """Apply one browser command and acknowledge it. Successful heartbeats are silent."""
     command_id = None
     try:
@@ -67,6 +70,8 @@ def handle_command(controller: MotionController, session: str, message: tuple[st
             raise Rejected("Invalid command")
         action = command["type"]
         command_id = command.get("id")
+        if read_only:
+            raise Rejected("Hardware observation is read-only")
         if action == "heartbeat":
             controller.heartbeat(session)
             return None
@@ -132,8 +137,18 @@ def finish_gesture(controller: MotionController, session: str, task: asyncio.Tas
     return {"type": "ack", "id": command_id, "ok": True}
 
 
-def create_app(backend: str) -> FastAPI:
-    """Build the same local console for the mock or the isolated DDS simulator."""
+def create_app(backend: str, *, dds_interface: str = "", dds_domain: int = 0) -> FastAPI:
+    """Serve mock, simulated, or read-only physical G1 feedback."""
+    read_only = backend == "hardware"
+    if read_only:
+        if not dds_interface:
+            raise ValueError("Hardware mode requires --dds-interface with the robot-facing Ethernet interface")
+        try:
+            if_nametoindex(dds_interface)
+        except OSError as error:
+            raise ValueError(f"DDS network interface does not exist: {dds_interface}") from error
+        if dds_domain < 0:
+            raise ValueError("DDS domain must be non-negative")
     trace = LatencyTrace() if backend == "sim" and os.environ.get("G1_MEASURE_LATENCY") == "1" else None
 
     @asynccontextmanager
@@ -148,6 +163,10 @@ def create_app(backend: str) -> FastAPI:
                 clearance = MujocoClearance()
                 simulator = subprocess.Popen([sys.executable, "-m", "g1_control.simulator"])
                 transport = DdsTransport(trace)
+            elif read_only:
+                from g1_control.dds_transport import DdsObservation
+
+                transport = DdsObservation(dds_domain, dds_interface)
             else:
                 from g1_control.mock import MockTransport
 
@@ -176,10 +195,12 @@ def create_app(backend: str) -> FastAPI:
     async def config():
         return {
             "backend": backend,
+            "read_only": read_only,
             "joints": [{"name": name, "min": low + TARGET_MARGIN, "max": high - TARGET_MARGIN}
                        for name, (low, high) in JOINT_LIMITS.items()],
-            "gestures": [{"id": slug, "name": gesture.name, "sdk_id": gesture.sdk_id}
-                         for slug, gesture in GESTURES.items()],
+            "gestures": [] if read_only else [
+                {"id": slug, "name": gesture.name, "sdk_id": gesture.sdk_id} for slug, gesture in GESTURES.items()
+            ],
         }
 
     @app.websocket("/control")
@@ -206,7 +227,8 @@ def create_app(backend: str) -> FastAPI:
                                               return_when=asyncio.FIRST_COMPLETED)
                 if incoming in ready:
                     ready.remove(incoming)
-                    acknowledgment = handle_command(controller, session, incoming.result(), plans, trace)
+                    acknowledgment = handle_command(controller, session, incoming.result(), plans, trace,
+                                                    read_only=read_only)
                     incoming = asyncio.create_task(receive_command(socket))
                     if acknowledgment is not None:
                         await socket.send_json(acknowledgment)
@@ -232,8 +254,16 @@ def create_app(backend: str) -> FastAPI:
 def main() -> None:
     """Serve one controller process in its Docker container."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("mock", "sim"), required=True)
-    uvicorn.run(create_app(parser.parse_args().backend), host="0.0.0.0", port=8000, ws_max_size=4096)
+    parser.add_argument("--backend", choices=("mock", "sim", "hardware"), required=True)
+    parser.add_argument("--dds-interface", default="", help="Robot-facing Ethernet interface for hardware mode")
+    parser.add_argument("--dds-domain", type=int, default=0, help="DDS domain for hardware mode")
+    args = parser.parse_args()
+    try:
+        app = create_app(args.backend, dds_interface=args.dds_interface, dds_domain=args.dds_domain)
+    except ValueError as error:
+        parser.error(str(error))
+    host, port = ("127.0.0.1", HARDWARE_PORT) if args.backend == "hardware" else ("0.0.0.0", 8000)
+    uvicorn.run(app, host=host, port=port, ws_max_size=4096)
 
 
 if __name__ == "__main__":

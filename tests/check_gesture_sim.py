@@ -1,6 +1,6 @@
 """Replay the catalog in actual MuJoCo physics at a deterministic simulated cadence."""
 
-from math import radians
+from math import ceil, radians
 
 import numpy as np
 
@@ -63,6 +63,7 @@ class SimulationRun:
         request = self.controller.prepare_gesture(OPERATOR, gesture.name, gesture.frames)
         segments = self.controller.plan_gesture(request)
         self.controller.finish_plan(OPERATOR, request, segments)
+        return sum(segment.seconds for segment in segments)
 
 
 def check_catalog(model, clearance):
@@ -75,8 +76,8 @@ def check_catalog(model, clearance):
                     run.controller.set_joint(OPERATOR, "right_wrist_roll", -0.20)
                     run.settle()
                     assert max(map(abs, run.read().position)) > 0.15
-                run.start(gesture)
-                assert run.settle() > 0.3
+                duration = run.start(gesture)
+                assert run.settle(max_ticks=ceil((duration + 5) / COMMAND_PERIOD)) > 0.3
                 assert max(map(abs, run.read().position)) < 0.08
 
             run = SimulationRun(model, clearance)

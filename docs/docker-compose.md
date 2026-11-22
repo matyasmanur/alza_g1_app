@@ -74,6 +74,16 @@ Open the web app in your browser.
 http://127.0.0.1:8000
 ```
 
+## Observe a physical G1
+
+Use native Docker Engine on Linux and connect the PC's Ethernet interface to the G1. Configure the host interface on the robot's subnet, then pass its interface name to the hardware service. The service uses host networking for DDS and serves a read-only view on loopback.
+
+```bash
+G1_DDS_INTERFACE=enp2s0 docker compose -f compose.yaml up web-hw
+```
+
+Open `http://127.0.0.1:8002` on the Linux PC. The default DDS domain is `0`. Use `G1_DDS_DOMAIN` if the robot uses a different domain.
+
 ## Open a shell for the SDK examples
 
 Keep the simulator running and leave the web app in **Observation**. From a second terminal, open a shell in the container.
@@ -91,5 +101,5 @@ Press `Ctrl+C` to stop the foreground run. To remove the containers, run the com
 
 ```bash
 docker compose -f compose.yaml -f compose.mac.yaml --profile web-mock down  # macOS
-docker compose -f compose.yaml --profile web-mock down                      # Linux
+docker compose -f compose.yaml --profile web-mock --profile web-hw down     # Linux
 ```

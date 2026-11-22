@@ -1,4 +1,4 @@
-"""Official Unitree SDK transport for the supported-base Docker simulation."""
+"""Unitree SDK telemetry and simulated arm commands."""
 
 from math import isfinite
 from time import monotonic
@@ -18,27 +18,24 @@ from g1_control.transport import Angles, Feedback
 ARM_GAINS = tuple((8.0, 1.0) if "wrist" in joint else (45.0, 4.0) for joint in JOINT_NAMES)
 
 
-class DdsTransport:
-    """Keep DDS callbacks confined to immutable telemetry snapshots."""
+class DdsObservation:
+    """Read G1 telemetry without creating a DDS command writer."""
 
-    def __init__(self, trace: LatencyTrace | None = None) -> None:
-        ChannelFactoryInitialize(DOMAIN_ID, INTERFACE)
+    def __init__(self, domain_id: int, interface: str, *, mode_machine: int | None = None,
+                 trace: LatencyTrace | None = None) -> None:
+        ChannelFactoryInitialize(domain_id, interface)
         self._crc = CRC()
         self._latest: Feedback | None = None
         self._last_tick: int | None = None
         self._trace = trace
-        self._command = unitree_hg_msg_dds__LowCmd_()
-        self._command.mode_machine = MODE_MACHINE
-        for index, gains in enumerate(ARM_GAINS, start=ARM_START):
-            motor = self._command.motor_cmd[index]
-            motor.kp, motor.kd = gains
-        self._publisher = ChannelPublisher(ARM_TOPIC, LowCmd_)
-        self._publisher.Init()
+        self._mode_machine = mode_machine
         self._subscriber = ChannelSubscriber(STATE_TOPIC, LowState_)
         self._subscriber.Init(self._receive, 1)
 
     def _receive(self, message: LowState_) -> None:
-        if message.mode_machine != MODE_MACHINE or message.tick == self._last_tick:
+        if message.tick == self._last_tick:
+            return
+        if self._mode_machine is not None and message.mode_machine != self._mode_machine:
             return
         if self._crc.Crc(message) != message.crc:
             return
@@ -55,6 +52,23 @@ class DdsTransport:
     def read(self) -> Feedback | None:
         """Return the most recent valid, advancing G1 arm sample."""
         return self._latest
+
+    def write(self, position: Angles, velocity: Angles, *, enabled: bool) -> None:
+        raise OSError("Hardware observation is read-only")
+
+
+class DdsTransport(DdsObservation):
+    """Add a command writer on the simulator's isolated DDS interface."""
+
+    def __init__(self, trace: LatencyTrace | None = None) -> None:
+        super().__init__(DOMAIN_ID, INTERFACE, mode_machine=MODE_MACHINE, trace=trace)
+        self._command = unitree_hg_msg_dds__LowCmd_()
+        self._command.mode_machine = MODE_MACHINE
+        for index, gains in enumerate(ARM_GAINS, start=ARM_START):
+            motor = self._command.motor_cmd[index]
+            motor.kp, motor.kd = gains
+        self._publisher = ChannelPublisher(ARM_TOPIC, LowCmd_)
+        self._publisher.Init()
 
     def write(self, position: Angles, velocity: Angles, *, enabled: bool) -> None:
         """Send one G1 arm setpoint or release arm authority on the simulator."""
