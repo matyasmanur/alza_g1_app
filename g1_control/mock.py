@@ -11,11 +11,12 @@ from g1_control.transport import Angles, Feedback
 class MockTransport:
     """Follow bounded targets with simple lag, using the caller's clock."""
 
-    def __init__(self, clock: Callable[[], float] = monotonic) -> None:
+    def __init__(self, clock: Callable[[], float] = monotonic,
+                 position: Angles = (0.0,) * len(JOINT_NAMES)) -> None:
         self.clock = clock
         self.feedback_enabled = True
         self.authority = False
-        self.position = self.target = (0.0,) * len(JOINT_NAMES)
+        self.position = self.target = position
         self.updated_at = clock()
         self.last_write = self.updated_at
 

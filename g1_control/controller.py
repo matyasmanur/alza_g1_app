@@ -7,13 +7,14 @@ from math import copysign, isfinite, sqrt
 from time import monotonic
 from typing import Callable
 
-from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, MAX_ACCELERATION, MAX_SPEED, TARGET_MARGIN
+from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, MAX_ACCELERATION, MAX_SPEED, PARKED, TARGET_MARGIN
 from g1_control.protocol import COMMAND_PERIOD, COMMAND_TIMEOUT
-from g1_control.trajectory import Clearance, Keyframe, PlanRequest, Segment, UnsafePath, path_issue, plan
+from g1_control.trajectory import (
+    MARGIN_METRES, READY, Clearance, Escape, Keyframe, PlanRequest, Segment, UnsafePath, path_issue, plan,
+)
 from g1_control.transport import Angles, ArmTransport, Feedback
 
 OPERATOR_TIMEOUT = 1.0
-POSITION_TOLERANCE = 0.08
 VELOCITY_TOLERANCE = 0.10
 ZERO = (0.0,) * len(JOINT_NAMES)
 
@@ -73,10 +74,12 @@ class MotionController:
         self._position = ZERO
         self._velocity = ZERO
         self._clearance = clearance
+        self._escapes = self._monitors()
         self._plan: PlanRequest | None = None
         self._segments: deque[Segment] = deque()
         self._segment_elapsed = 0.0
         self._gesture: str | None = None
+        self._release = False
         self._fault: str | None = None
 
     @property
@@ -110,6 +113,14 @@ class MotionController:
             self._owner = None
             self._cancel_motion()
 
+    def release(self, session: str) -> PlanRequest | None:
+        """Park the arms before giving up control, or release at once when motion is disabled."""
+        self._require_owner(session)
+        if not self._enabled:
+            self.disconnect(session)
+            return None
+        return self.prepare_gesture(session, "Parking arms", (), PARKED, release=True)
+
     def enable(self, session: str) -> None:
         """Seed a new motion session from a fresh, stationary measured pose."""
         self._require_owner(session)
@@ -122,8 +133,7 @@ class MotionController:
             raise Rejected("Wait until the arms settle before enabling")
         if any(not low <= q <= high for q, (low, high) in zip(feedback.position, JOINT_LIMITS.values())):
             raise Rejected("Measured pose is outside the joint limits")
-        if self._clearance is not None and (issue := self._clearance(feedback.position, feedback.lower_position)):
-            raise Rejected(issue)
+        self._escapes = self._monitors()
         self._position = self._target = feedback.position
         self._velocity = ZERO
         self._fault = None
@@ -155,13 +165,14 @@ class MotionController:
             raise Rejected(str(error)) from error
         self.finish_plan(session, request, segments)
 
-    def prepare_gesture(self, session: str, name: str, frames: tuple[Keyframe, ...]) -> PlanRequest:
-        """Reserve motion and capture a stationary pose before planning."""
+    def prepare_gesture(self, session: str, name: str, frames: tuple[Keyframe, ...],
+                        end: Angles = READY, release: bool = False) -> PlanRequest:
+        """Reserve motion and capture a stationary pose before planning a route that finishes at end."""
         self._require_enabled(session)
         if self._motion is not Motion.IDLE:
             raise Rejected("Wait for the current motion to settle")
-        if (not frames or any(len(frame.pose) != len(JOINT_NAMES)
-                              or not isfinite(frame.seconds) or frame.seconds <= 0 for frame in frames)):
+        if any(len(frame.pose) != len(JOINT_NAMES)
+               or not isfinite(frame.seconds) or frame.seconds <= 0 for frame in frames):
             raise Rejected("A gesture needs timed, complete arm poses")
         if any(abs(v) > VELOCITY_TOLERANCE for v in self._feedback.velocity):
             raise Rejected("Wait for the current motion to settle")
@@ -169,7 +180,7 @@ class MotionController:
             Keyframe(tuple(checked_target(joint, q) for joint, q in zip(JOINT_NAMES, frame.pose)), frame.seconds)
             for frame in frames
         )
-        self._plan = PlanRequest(name, self._feedback, self._position, checked)
+        self._plan = PlanRequest(name, self._feedback, self._position, checked, end, release)
         self._gesture = name
         self._motion = Motion.PLANNING
         return self._plan
@@ -187,6 +198,8 @@ class MotionController:
         self._gesture = None
         self._require_enabled(session)
         if not segments:
+            if request.release:
+                self.disconnect(session)
             return
         before = request.feedback.lower_position + request.feedback.position
         now = self._feedback.lower_position + self._feedback.position
@@ -196,6 +209,7 @@ class MotionController:
         self._segment_elapsed = 0.0
         self._target = segments[0].end
         self._gesture = request.name
+        self._release = request.release
         self._motion = Motion.GESTURE
 
     def stop(self, session: str) -> None:
@@ -245,8 +259,9 @@ class MotionController:
             self._disarm_fault("Generated setpoint exceeded the joint limits")
             return
         if self._clearance is not None and self._motion in (Motion.MANUAL, Motion.GESTURE, Motion.STOPPING):
-            for pose in (self._feedback.position, self._position):
-                if issue := self._clearance(pose, self._feedback.lower_position):
+            for pose, escape in zip((self._feedback.position, self._position), self._escapes):
+                issue = self._clearance(pose, self._feedback.lower_position)
+                if escape.blocks(issue):
                     try:
                         self._transport.write(self._feedback.position, ZERO, enabled=False)
                     except OSError:
@@ -265,6 +280,16 @@ class MotionController:
         elif self._motion in (Motion.MANUAL, Motion.GESTURE) and not self._segments and self._settled():
             self._motion = Motion.IDLE
             self._gesture = None
+            if self._release:
+                self.disconnect(self._owner)
+
+    @staticmethod
+    def _monitors() -> tuple[Escape, Escape]:
+        """Stop on measured contact, and on a commanded pose that drifts back inside the margin.
+
+        The margin absorbs tracking error, so the measured pose may use all of it.
+        """
+        return Escape(MARGIN_METRES + 0.002), Escape(0.0015)
 
     def _fresh(self, now: float) -> bool:
         return self._feedback is not None and now - self._feedback.received_at < COMMAND_TIMEOUT
@@ -286,6 +311,7 @@ class MotionController:
         self._plan = None
         self._segments.clear()
         self._gesture = None
+        self._release = False
 
     def _disarm_fault(self, reason: str) -> None:
         self._cancel_motion()
@@ -319,10 +345,9 @@ class MotionController:
             self._segment_elapsed = 0.0
 
     def _settled(self) -> bool:
-        feedback = self._feedback
+        """The command has arrived and the arm has stopped. Gravity may hold it short of the target."""
         return (
             max(abs(a - b) for a, b in zip(self._position, self._target)) < 0.001
             and max(map(abs, self._velocity)) < 0.01
-            and max(abs(a - b) for a, b in zip(feedback.position, self._target)) < POSITION_TOLERANCE
-            and max(map(abs, feedback.velocity)) < VELOCITY_TOLERANCE
+            and max(map(abs, self._feedback.velocity)) < VELOCITY_TOLERANCE
         )

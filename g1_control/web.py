@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from g1_control.controller import Motion, MotionController, Rejected
 from g1_control.gestures import GESTURES
-from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, TARGET_MARGIN
+from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, PARKED, TARGET_MARGIN
 from g1_control.latency import LatencyTrace
 from g1_control.protocol import COMMAND_PERIOD
 from g1_control.trajectory import PlanRequest, UnsafePath
@@ -72,18 +72,24 @@ def handle_command(controller: MotionController, session: str, message: tuple[st
             return None
         if type(command_id) is not int:
             raise Rejected("Invalid command ID")
-        if action == "gesture":
-            gesture_id = command.get("gesture")
-            if not isinstance(gesture_id, str) or gesture_id not in GESTURES:
-                raise Rejected("Unknown gesture")
-            gesture = GESTURES[gesture_id]
-            request = controller.prepare_gesture(session, gesture.name, gesture.frames)
+        if action in ("gesture", "ready", "release_control"):
+            if action == "gesture":
+                gesture_id = command.get("gesture")
+                if not isinstance(gesture_id, str) or gesture_id not in GESTURES:
+                    raise Rejected("Unknown gesture")
+                gesture = GESTURES[gesture_id]
+                request = controller.prepare_gesture(session, gesture.name, gesture.frames)
+            elif action == "ready":
+                request = controller.prepare_gesture(session, "Ready pose", ())
+            else:
+                request = controller.release(session)
             if trace is not None:
                 trace.cancel(session)
-            task = asyncio.create_task(asyncio.to_thread(controller.plan_gesture, request))
-            plans[task] = command_id, request
-            return None
-        if action == "set_joint":
+            if request is not None:
+                task = asyncio.create_task(asyncio.to_thread(controller.plan_gesture, request))
+                plans[task] = command_id, request
+                return None
+        elif action == "set_joint":
             if not isinstance(command.get("joint"), str):
                 raise Rejected("Missing arm joint")
             joint = command["joint"]
@@ -97,13 +103,13 @@ def handle_command(controller: MotionController, session: str, message: tuple[st
                     trace.cancel(session)
         else:
             actions = {
-                "take_control": controller.take_control, "release_control": controller.disconnect,
-                "enable": controller.enable, "stop": controller.stop, "reset_stop": controller.reset_stop,
+                "take_control": controller.take_control, "enable": controller.enable,
+                "stop": controller.stop, "reset_stop": controller.reset_stop,
             }
             if action not in actions:
                 raise Rejected("Unknown command")
             actions[action](session)
-            if trace is not None and action in {"stop", "release_control"}:
+            if trace is not None and action == "stop":
                 trace.cancel(session)
     except (ValueError, TypeError, RecursionError) as error:
         return {"type": "ack", "id": command_id if type(command_id) is int else None,
@@ -145,7 +151,7 @@ def create_app(backend: str) -> FastAPI:
             else:
                 from g1_control.mock import MockTransport
 
-                transport = MockTransport()
+                transport = MockTransport(position=PARKED)
             app.state.controller = MotionController(transport, clearance=clearance)
             worker = asyncio.create_task(run_controller(app.state.controller))
             yield

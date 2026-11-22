@@ -25,7 +25,7 @@ from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowState_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
 from unitree_sdk2py.utils.crc import CRC
 
-from g1_control.joints import JOINT_LIMITS, JOINT_NAMES
+from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, PARKED
 from g1_control.protocol import (
     ARM_END,
     ARM_START,
@@ -65,11 +65,12 @@ def load_supported_model(path: Path) -> mujoco.MjModel:
 class ArmPlant:
     """Advance the same supported G1 physics with live or deterministic inputs."""
 
-    def __init__(self, model: mujoco.MjModel) -> None:
+    def __init__(self, model: mujoco.MjModel, arms: tuple[float, ...] = PARKED) -> None:
         self.model = model
         self.data = mujoco.MjData(model)
         joint_ids = model.actuator_trnid[:, 0]
         self.position_indices = model.jnt_qposadr[joint_ids]
+        self.data.qpos[self.position_indices[ARMS]] = arms
         self.velocity_indices = model.jnt_dofadr[joint_ids]
         self.arm_limits = model.jnt_range[joint_ids[ARMS]]
         self.hold = self.data.qpos[self.position_indices].copy()
