@@ -1,0 +1,12 @@
+services:
+  web-sim:
+    ipc: private
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: graphics,display,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

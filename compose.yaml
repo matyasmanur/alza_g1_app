@@ -3,28 +3,27 @@ services:
     build:
       context: .
       target: web-sim
-    platform: linux/arm64
-    ports:
-      - "127.0.0.1:8001:8000"
-      - "127.0.0.1:6080:6080"
+    ports: ["127.0.0.1:8001:8000"]
     environment:
       G1_MEASURE_LATENCY: ${G1_MEASURE_LATENCY:-0}
       G1_SIM_VIEWER: ${G1_SIM_VIEWER:-1}
-      LIBGL_ALWAYS_SOFTWARE: "1"
-    volumes: [".:/work:ro"]
+      DISPLAY: ${DISPLAY:-}
+      XAUTHORITY: /tmp/desktop.xauth
+    # Local X11 cookies are keyed by the desktop hostname.
+    uts: host
+    # Mesa software GLX uses X11 shared memory across the container boundary.
+    ipc: host
+    volumes:
+      - .:/work:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - type: bind
+        source: ${XAUTHORITY:-${HOME}/.Xauthority}
+        target: /tmp/desktop.xauth
+        read_only: true
+        bind:
+          create_host_path: false
     init: true
-    command:
-      - sh
-      - -ec
-      - |
-        if [ "$$G1_SIM_VIEWER" = 1 ]; then
-          exec xvfb-run -a -s "-screen 0 1280x900x24" sh -ec '
-            x11vnc -localhost -nopw -forever -shared -rfbport 5900 &
-            websockify --web /usr/share/novnc 6080 localhost:5900 &
-            exec python -B -m g1_control.web --backend sim
-          '
-        fi
-        exec python -B -m g1_control.web --backend sim
+    command: ["python", "-B", "-m", "g1_control.web", "--backend", "sim"]
 
   web-mock:
     profiles: [web-mock]
@@ -51,7 +50,6 @@ services:
       context: .
       target: arm-sim
     image: unitree-g1:arm-sim
-    platform: linux/arm64
     network_mode: none
     volumes: [".:/work:ro"]
     init: true
