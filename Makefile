@@ -1,10 +1,8 @@
 COMPOSE := docker compose -f compose.yaml
 ifeq ($(shell uname -s),Darwin)
 COMPOSE += -f compose.mac.yaml
-else ifeq ($(filter web-sim,$(MAKECMDGOALS)),web-sim)
-ifneq ($(shell docker info --format '{{if index .Runtimes "nvidia"}}yes{{end}}'),)
-COMPOSE += -f compose.gpu.yaml
-endif
+else ifeq ($(filter web-sim,$(MAKECMDGOALS)):$(G1_SIM_VIEWER),web-sim:1)
+COMPOSE += -f compose.x11.yaml
 endif
 
 .PHONY: build up down shell

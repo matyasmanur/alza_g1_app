@@ -1,0 +1,19 @@
+services:
+  web-sim:
+    environment:
+      G1_SIM_VIEWER: "1"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      DISPLAY: ${DISPLAY:-}
+      XAUTHORITY: /tmp/desktop.xauth
+    # Local X11 cookies are keyed by the desktop hostname.
+    uts: host
+    # Mesa software GLX uses X11 shared memory across the container boundary.
+    ipc: host
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - type: bind
+        source: ${XAUTHORITY:-${HOME}/.Xauthority}
+        target: /tmp/desktop.xauth
+        read_only: true
+        bind:
+          create_host_path: false

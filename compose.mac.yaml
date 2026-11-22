@@ -4,11 +4,8 @@ services:
       target: web-sim-mac
     ports: ["127.0.0.1:6080:6080"]
     environment:
+      G1_SIM_VIEWER: ${G1_SIM_VIEWER:-0}
       LIBGL_ALWAYS_SOFTWARE: "1"
-      XAUTHORITY: !reset null
-    uts: !reset null
-    ipc: !reset null
-    volumes: !override [".:/work:ro"]
     command:
       - sh
       - -ec

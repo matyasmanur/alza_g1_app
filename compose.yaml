@@ -6,22 +6,8 @@ services:
     ports: ["127.0.0.1:8001:8000"]
     environment:
       G1_MEASURE_LATENCY: ${G1_MEASURE_LATENCY:-0}
-      G1_SIM_VIEWER: ${G1_SIM_VIEWER:-1}
-      DISPLAY: ${DISPLAY:-}
-      XAUTHORITY: /tmp/desktop.xauth
-    # Local X11 cookies are keyed by the desktop hostname.
-    uts: host
-    # Mesa software GLX uses X11 shared memory across the container boundary.
-    ipc: host
-    volumes:
-      - .:/work:ro
-      - /tmp/.X11-unix:/tmp/.X11-unix:ro
-      - type: bind
-        source: ${XAUTHORITY:-${HOME}/.Xauthority}
-        target: /tmp/desktop.xauth
-        read_only: true
-        bind:
-          create_host_path: false
+      G1_SIM_VIEWER: "0"
+    volumes: [".:/work:ro"]
     init: true
     command: ["python", "-B", "-m", "g1_control.web", "--backend", "sim"]
 
