@@ -99,7 +99,7 @@ http://127.0.0.1:8002
 
 ## Webapp Examples 
 
-All six recordings use simulation mode.
+All seven recordings use simulation mode.
 
 ### 1. Take control and move to Ready
 
@@ -136,6 +136,12 @@ Select a gesture under **Recorded** and click **Play gesture**. The app checks t
 With motion enabled and the arms settled, click **Release control**. The app moves the arms to the parked pose and returns to **Observation**.
 
 ![Releasing control parks the G1 arms and returns the app to Observation](docs/media/6-release-control.gif)
+
+### 7. Drive the G1 in Locomotion mode
+
+Click **Take control**, select **Locomotion**, and then click **Enable motion**. Hold a direction button or its keyboard shortcut to walk or turn. Release it to stop and balance in place.
+
+![The G1 walking in MuJoCo under browser control](docs/media/7-locomotion.gif)
 
 ## Record a gesture
 
