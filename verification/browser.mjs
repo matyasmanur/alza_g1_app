@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { chromium } from "playwright";
 
 const mode = process.argv[2];
-assert(["benchmark", "demo"].includes(mode), "Choose benchmark or demo");
+assert(["benchmark", "demo", "locomotion"].includes(mode), "Choose benchmark, demo, or locomotion");
 const url = "http://127.0.0.1:8000";
 let serverReady = false;
 for (let attempt = 0; attempt < 40 && !serverReady; attempt++) {
@@ -97,6 +97,82 @@ async function demo() {
   await page.waitForTimeout(1600);
 }
 
+async function locomotion() {
+  const last = () => page.evaluate(() => window.g1State);
+  const isMode = expected => page.waitForFunction(expected => {
+    const state = window.g1State;
+    return state?.mode === expected && !state.switching;
+  }, expected);
+  const enable = page.getByRole("button", { name: "Enable motion" });
+  const elbow = page.locator("#left_elbow");
+  await clickAngle("left_elbow", 18);
+  await text("#motion", "Manual motion");
+  await page.getByRole("button", { name: "Locomotion", exact: true }).click();
+  await isMode("locomotion");
+  assert(await elbow.isDisabled());
+  assert(await page.getByRole("button", { name: "Face wave", includeHidden: true }).isHidden());
+  const forward = page.locator('[data-drive="KeyW"]');
+  assert(await forward.isDisabled());
+  await enable.click();
+  await forward.hover();
+  const initial = await last();
+  await page.mouse.down();
+  await text("#motion", "Walking");
+  await page.waitForFunction(x => window.g1State.base.position[0] > x + 0.35, initial.base.position[0]);
+  await page.mouse.up();
+  await text("#motion", "Idle");
+
+  const beforeTurn = (await last()).base.quaternion;
+  await page.keyboard.down("q");
+  await page.waitForFunction(q => Math.abs(window.g1State.base.quaternion.reduce(
+    (sum, value, i) => sum + value * q[i], 0)) < 0.985, beforeTurn);
+  await page.keyboard.press("Escape");
+  await page.keyboard.up("q");
+  await text("#motion", "Stopped · Latched");
+  assert(await forward.isDisabled());
+  assert(await elbow.isDisabled());
+  await page.getByRole("button", { name: "Reset Stop" }).click();
+  await enable.click();
+  await page.waitForFunction(() => !document.querySelector('[data-drive="KeyW"]').disabled);
+
+  const beforeSide = (await last()).base;
+  await page.keyboard.down("d");
+  await page.waitForFunction(({ position, quaternion }) => {
+    const [w, x, y, z] = quaternion;
+    const heading = Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
+    const [nextX, nextY] = window.g1State.base.position;
+    return Math.sin(heading) * (nextX - position[0]) - Math.cos(heading) * (nextY - position[1]) > 0.14;
+  }, beforeSide);
+  await page.keyboard.up("d");
+  await text("#motion", "Idle");
+
+  const beforeBlur = (await last()).base.position;
+  await page.keyboard.down("w");
+  await text("#motion", "Walking");
+  await page.waitForFunction(([x, y]) => {
+    const [nextX, nextY] = window.g1State.base.position;
+    return Math.hypot(nextX - x, nextY - y) > 0.12;
+  }, beforeBlur);
+  await page.evaluate(() => dispatchEvent(new Event("blur")));
+  await text("#motion", "Idle");
+  await page.keyboard.up("w");
+  await page.waitForTimeout(1300);
+  await page.waitForFunction(() => Math.hypot(...window.g1State.base.velocity.slice(0, 2)) < 0.08,
+    undefined, { timeout: 4000 });
+
+  await page.getByRole("button", { name: "Arms", exact: true }).click();
+  await isMode("arms");
+  const landed = await last();
+  assert(landed.base.position[0] - initial.base.position[0] > 0.35);
+  assert(Math.abs(landed.base.quaternion[3]) > 0.12);
+  await enable.click();
+  await page.getByRole("button", { name: "Face wave" }).click();
+  await text("#motion", "Running · Face wave");
+  await observeMotion("left_shoulder_pitch", -26);
+  await text("#command-status", "Gesture complete. Arms returned to Ready.");
+  console.log("Verified arm motion, mode handoffs, walking, strafing, turning, Stop, blur, and a gesture at the new position");
+}
+
 if (mode === "benchmark") {
   await page.addInitScript(() => {
     window.g1Timings = [];
@@ -130,6 +206,39 @@ if (mode === "benchmark") {
   });
 }
 
+if (mode === "locomotion") {
+  await page.addInitScript(() => {
+    const Socket = window.WebSocket;
+    window.g1Events = [];
+    window.WebSocket = class extends Socket {
+      constructor(...args) {
+        super(...args);
+        this.addEventListener("close", event => window.g1Events.push([Math.round(performance.now()), "close", event.code]));
+        this.addEventListener("message", ({ data }) => {
+          const packet = JSON.parse(data);
+          if (packet.type === "state") {
+            const change = [packet.mode, packet.switching, packet.motion, packet.owned, packet.fault].join("|");
+            if (change !== this.change) window.g1Events.push([Math.round(performance.now()), change]);
+            this.change = change;
+            window.g1State = packet;
+          } else if (packet.type === "ack" && !packet.ok) {
+            window.g1Events.push([Math.round(performance.now()), packet]);
+          }
+        });
+      }
+
+      send(data) {
+        const { type } = JSON.parse(data);
+        if (type === "heartbeat" && performance.now() - (this.lastBeat ?? 0) > 450) {
+          window.g1Events.push([Math.round(performance.now()), "heartbeat gap", Math.round(performance.now() - (this.lastBeat ?? 0))]);
+        }
+        if (type === "heartbeat") this.lastBeat = performance.now();
+        super.send(data);
+      }
+    };
+  });
+}
+
 try {
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await text("#backend", "MuJoCo");
@@ -139,10 +248,21 @@ try {
   await page.waitForFunction(() => !document.querySelector("#left_elbow").disabled);
   if (mode === "benchmark") {
     await benchmark();
-  } else {
+  } else if (mode === "demo") {
     await demo();
+  } else {
+    await locomotion();
   }
   assert.deepEqual(pageErrors, []);
+} catch (error) {
+  if (mode === "locomotion") {
+    console.error(await page.evaluate(() => ({
+      state: window.g1State,
+      activity: document.getElementById("command-status").textContent,
+      events: window.g1Events,
+    })), pageErrors);
+  }
+  throw error;
 } finally {
   await context.close();
   await browser.close();

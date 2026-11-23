@@ -37,7 +37,8 @@ def main() -> None:
         assert state["connection"] == "connected"
         assert len(state["pose"]) == 29 and state["pose"][ARM_START] == 0.25
 
-        for action in ("take_control", "enable", "set_joint", "gesture", "ready", "release_control", "stop", "reset_stop"):
+        for action in ("take_control", "enable", "set_joint", "gesture", "ready", "release_control", "stop",
+                       "reset_stop", "set_mode", "drive"):
             command = json.dumps({"type": action, "id": 1}), monotonic()
             acknowledgment = handle_command(controller, "browser", command, {}, None, [], read_only=True)
             assert acknowledgment == {

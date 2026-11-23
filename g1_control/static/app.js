@@ -1,4 +1,4 @@
-import { createViewer } from "/static/viewer.js?v=2";
+import { createViewer } from "/static/viewer.js?v=3";
 
 const $ = id => document.getElementById(id);
 const DEG = 180 / Math.PI;
@@ -12,6 +12,7 @@ let nextId = 0;
 let side = "left";
 let backendLabel = "";
 let readOnly = false;
+let locomotion = false;
 let recording = false;
 let recordedPoses = 0;
 let recorderPending = false;
@@ -27,9 +28,44 @@ const messages = {
   gesture: "Gesture started.",
   ready: "Moving to the Ready pose.",
   release_control: "Releasing control.",
+  set_mode: "Changing control mode. Wait for the robot to settle.",
   stop: "Stop requested. Waiting for the arms to settle.",
   reset_stop: "Stop reset. Motion is disabled.",
 };
+
+const driveButtons = [...document.querySelectorAll("[data-drive]")];
+const modeButtons = [...document.querySelectorAll("[data-control-mode]")];
+const held = new Map();
+const driveKeys = {
+  KeyW: [1, 0, 0], KeyS: [-1, 0, 0], KeyA: [0, 1, 0],
+  KeyD: [0, -1, 0], KeyQ: [0, 0, 1], KeyE: [0, 0, -1],
+};
+const driveLimits = [0.35, 0.25, 0.5];
+
+function canDrive() {
+  return state?.connection === "connected" && state.mode === "locomotion" &&
+    state.owned && state.enabled && !state.switching && !state.stop_latched;
+}
+
+function sendDrive() {
+  const active = [...new Set(held.values())];
+  const axes = [0, 0, 0];
+  for (const key of active) driveKeys[key].forEach((value, index) => { axes[index] += value; });
+  const planar = Math.max(1, Math.hypot(axes[0], axes[1]));
+  const velocity = axes.map((value, index) => value * driveLimits[index] / (index < 2 ? planar : 1));
+  for (const button of driveButtons) button.toggleAttribute("data-held", active.includes(button.dataset.drive));
+  if (!active.length || canDrive() && socket?.bufferedAmount < 1024) send("drive", { velocity });
+}
+
+function clearDrive() {
+  if (!held.size) return;
+  held.clear();
+  sendDrive();
+}
+
+function releaseDrive(source) {
+  if (held.delete(source)) sendDrive();
+}
 
 function feedback(text, error = false) {
   const status = $("command-status");
@@ -53,7 +89,7 @@ $("command-status").dataset.time = clock();
 function send(type, values = {}) {
   if (socket?.readyState !== WebSocket.OPEN) return;
   const id = ++nextId;
-  if (type !== "heartbeat") commands.set(id, [type, performance.now()]);
+  if (type !== "heartbeat" && type !== "drive") commands.set(id, [type, performance.now()]);
   socket.send(JSON.stringify({ type, id, ...values }));
 }
 
@@ -154,9 +190,13 @@ function sendRecorder(action, values) {
 function render() {
   const connection = state?.connection ?? "offline";
   const connected = connection === "connected";
+  const mode = state?.mode ?? "arms";
+  const switching = Boolean(state?.switching) || ["preparing", "settling", "supporting"].includes(mode);
+  const fallen = mode === "fallen";
+  const arms = mode === "arms" && !switching;
   const stopping = state?.motion === "stopping";
   const busy = ["planning", "gesture"].includes(state?.motion);
-  const manual = !readOnly && connected && state.owned && state.enabled && !busy;
+  const manual = arms && !readOnly && connected && state.owned && state.enabled && !busy;
   const canPlay = manual && state.motion === "idle";
   const owned = connected && state.owned;
   const label = { connected: "Connected", waiting: "Waiting for feedback", stale: "Stale feedback", offline: "Offline" }[connection];
@@ -165,23 +205,42 @@ function render() {
   $("ownership").textContent = readOnly ? "Read only" :
     owned ? "You have control" : state?.control_taken ? "Another operator" : "Observation";
   const latched = state?.stop_latched;
-  $("motion").textContent = stopping ? "Stopping" : latched ? "Stopped · Latched" :
+  $("motion").textContent = fallen ? "Reset required" : stopping ? "Stopping" : latched ? "Stopped · Latched" :
     { manual: "Manual motion", planning: `Planning · ${state?.gesture}`,
-      gesture: `Running · ${state?.gesture}`, idle: "Idle" }[state?.motion ?? "idle"];
-  $("motion").dataset.tone = (latched || stopping) ? "danger" : busy ? "busy" : manual ? "active" : "neutral";
+      gesture: `Running · ${state?.gesture}`, driving: "Walking", idle: switching ? "Switching mode" : "Idle"
+    }[state?.motion ?? "idle"];
+  $("motion").dataset.tone = (latched || stopping || fallen) ? "danger" : busy || switching ? "busy" :
+    manual || canDrive() ? "active" : "neutral";
   $("ownership").dataset.tone = owned ? "good" : "neutral";
-  document.body.dataset.mode = !connected ? "offline" : latched || stopping ? "stopped" :
-    busy ? "gesture" : manual ? "manual" : "idle";
-  $("lock").textContent = busy ? "Locked · gesture running" : "Degrees";
+  document.body.dataset.mode = !connected ? "offline" : latched || stopping || fallen ? "stopped" :
+    busy || switching ? "gesture" : manual || canDrive() ? "manual" : "idle";
+  $("controls-title").textContent = switching ? "Changing mode" : fallen ? "Locomotion stopped" :
+    arms ? "Arm controls" : "Locomotion controls";
+  $("lock").textContent = busy ? "Locked · gesture running" : arms ? "Degrees" : "";
   $("lock").dataset.tone = busy ? "busy" : "neutral";
+  $("control-modes").hidden = !locomotion;
+  for (const button of modeButtons) {
+    const selected = (state?.switching === "reset" ? "arms" : state?.switching)
+      ?? (["arms", "settling", "supporting"].includes(mode) ? "arms" : "locomotion");
+    button.setAttribute("aria-pressed", String(button.dataset.controlMode === selected));
+    button.disabled = !owned || latched || switching || stopping || fallen || button.dataset.controlMode === selected;
+  }
+  $("arm-controls").hidden = !arms;
+  $("gestures-title").closest(".gestures").hidden = readOnly || !arms;
+  $("drive-controls").hidden = arms || switching || fallen;
+  $("drive-hint").textContent = canDrive() ? "Hold a button or key to move." :
+    state?.enabled ? "Driving paused." : "Enable motion to drive.";
+  for (const button of driveButtons) button.disabled = !canDrive();
+  if (!canDrive()) clearDrive();
   const step = !owned ? 0 : state.enabled ? 2 : 1;
   [...$("steps").children].forEach((item, index) => {
     item.dataset.state = index < step ? "done" : index === step && connected ? "current" : "";
   });
   $("take-control").hidden = Boolean(owned);
   $("take-control").disabled = readOnly || !connected || state.control_taken || stopping;
-  $("enable").hidden = !owned || state.enabled || latched || stopping;
-  $("reset-stop").hidden = !owned || !latched || stopping;
+  $("enable").hidden = !owned || state.enabled || latched || stopping || switching || fallen;
+  $("reset-stop").hidden = !owned || !latched || stopping || switching || fallen;
+  $("reset-sim").hidden = !owned || !fallen || switching;
   $("release-control").hidden = !owned;
   $("stop").disabled = readOnly || !owned || latched;
   $("ready").disabled = !canPlay;
@@ -195,15 +254,16 @@ function render() {
   $("record-gesture").disabled = !canPlay;
   $("gesture-recorder").hidden = !recording;
   $("capture-pose").disabled = !canPlay || recorderPending || Boolean(pending.size);
-  $("save-recording").disabled = !owned || !recordedPoses || recorderPending;
+  $("save-recording").disabled = !arms || !owned || !recordedPoses || recorderPending;
   $("discard-recording").disabled = recorderPending || !connected;
   if (!manual) {
     pending.clear();
     for (const row of rows) row.dragging = false;
   }
   for (const row of rows) {
-    row.root.hidden = row.arm !== side;
     row.slider.disabled = !manual;
+    if (!arms) continue;
+    row.root.hidden = row.arm !== side;
     const measured = state?.pose?.[state.pose.length - rows.length + row.index];
     const target = state?.target?.[row.index];
     const editing = manual && (row.dragging || performance.now() - row.lastEdit < 160);
@@ -232,17 +292,21 @@ function connect() {
       const previous = state;
       state = message;
       // Browsers throttle timers in background tabs, so the lease is renewed from state packets instead.
-      if (state.owned && lastStateAt - lastHeartbeat > 300) {
+      if (state.owned && lastStateAt - lastHeartbeat > 180) {
         lastHeartbeat = lastStateAt;
         send("heartbeat");
       }
-      viewer?.showPose(state.pose, previous?.connection !== "connected" || state.connection !== "connected", state.target);
+      viewer?.showPose(state.pose, previous?.connection !== "connected" || state.connection !== "connected",
+        state.target, state.base);
       if (state.fault && state.fault !== previous?.fault) feedback(state.fault, true);
       if (state.stop_latched && state.motion === "idle" && previous?.motion === "stopping") {
         feedback("Motion stopped. Reset Stop before enabling again.");
       }
       if (state.enabled && state.motion === "idle" && previous?.motion === "gesture") {
         feedback("Gesture complete. Arms returned to Ready.");
+      }
+      if (previous?.switching && !state.switching && state.owned && !state.fault && !state.stop_latched) {
+        feedback(`${state.mode === "arms" ? "Arms" : "Locomotion"} mode ready. Enable motion when ready.`);
       }
       if (previous?.owned && !state.owned && !state.fault) feedback("Control released. Take control to move again.");
       render();
@@ -270,7 +334,13 @@ function connect() {
     }
     // A gesture is acknowledged only after its path is planned, so it is not a transport latency.
     if (action && action !== "gesture") $("latency").textContent = `${(performance.now() - sentAt).toFixed(1)} ms`;
-    if (message.ok && messages[action]) feedback(messages[action]);
+    if (message.ok && action === "enable" && state?.mode === "locomotion") {
+      feedback("Motion enabled. Hold a drive control to move.");
+    } else if (message.ok && action === "stop" && state?.mode !== "arms") {
+      feedback("Stop requested. Waiting for the robot to settle.");
+    } else if (message.ok && messages[action]) {
+      feedback(messages[action]);
+    }
     if (!message.ok && action) {
       if (message.message === "Gesture planning was cancelled") return;
       if (action === "set_joint") rows.forEach(row => { row.lastEdit = -Infinity; });
@@ -278,8 +348,9 @@ function connect() {
     }
   });
   socket.addEventListener("close", () => {
-    if (state?.pose) viewer?.showPose(state.pose, true);
-    state = { pose: state?.pose, connection: "offline" };
+    clearDrive();
+    if (state?.pose) viewer?.showPose(state.pose, true, null, state.base);
+    state = { pose: state?.pose, mode: state?.mode, base: state?.base, connection: "offline" };
     commands.clear();
     feedback(recording ? "Connection lost. The unsaved recording was cleared." :
       "Connection lost. Waiting to reconnect.", true);
@@ -317,18 +388,58 @@ for (const button of document.querySelectorAll("[data-side]")) {
     render();
   });
 }
+for (const button of modeButtons) {
+  button.addEventListener("click", () => {
+    clearDrive();
+    pending.clear();
+    send("set_mode", { mode: button.dataset.controlMode });
+  });
+}
+$("reset-sim").addEventListener("click", () => send("set_mode", { mode: "reset" }));
+for (const button of driveButtons) {
+  button.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || !canDrive()) return;
+    button.setPointerCapture(event.pointerId);
+    held.set(event.pointerId, button.dataset.drive);
+    sendDrive();
+  });
+  for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    button.addEventListener(name, event => releaseDrive(event.pointerId));
+  }
+}
 for (const [id, command] of Object.entries({
   "take-control": "take_control", "release-control": "release_control", enable: "enable",
   stop: "stop", "reset-stop": "reset_stop",
 })) {
   $(id).addEventListener("click", () => {
-    if (command === "stop" || command === "release_control") pending.clear();
+    if (command === "stop" || command === "release_control") {
+      pending.clear();
+      clearDrive();
+    }
     send(command);
   });
 }
 addEventListener("keydown", event => {
-  if (event.key === "Escape" && !$("stop").disabled) $("stop").click();
+  if (event.key === "Escape" && !$("stop").disabled) {
+    $("stop").click();
+    return;
+  }
+  if (!canDrive() || event.altKey || event.ctrlKey || event.metaKey ||
+      event.target.closest?.("input, select, textarea, [contenteditable]")) return;
+  const key = (event.code === "Space" || event.code === "Enter")
+    ? event.target.dataset?.drive : event.code;
+  if (!driveKeys[key]) return;
+  event.preventDefault();
+  if (!event.repeat) {
+    held.set(event.code, key);
+    sendDrive();
+  }
 });
+addEventListener("keyup", event => releaseDrive(event.code));
+addEventListener("blur", clearDrive);
+addEventListener("pagehide", clearDrive);
+document.addEventListener("visibilitychange", () => { if (document.hidden) clearDrive(); });
+setInterval(() => { if (held.size && canDrive()) sendDrive(); }, 80);
 setInterval(() => {
   if (socket?.readyState === WebSocket.OPEN && performance.now() - lastStateAt > 900) {
     socket.close();
@@ -338,8 +449,9 @@ setInterval(() => {
 try {
   const config = await fetch("/config");
   if (!config.ok) throw new Error("Configuration unavailable");
-  const { backend, read_only, joints, gestures } = await config.json();
+  const { backend, read_only, locomotion: canSelectLocomotion, joints, gestures } = await config.json();
   readOnly = read_only;
+  locomotion = canSelectLocomotion;
   $("backend").textContent = { sim: "MuJoCo", mock: "Mock", hardware: "Physical G1" }[backend];
   backendLabel = { sim: "SIM", mock: "MOCK", hardware: "HARDWARE" }[backend];
   if (readOnly) {
@@ -366,7 +478,7 @@ try {
 
 try {
   viewer = await createViewer($("viewport"), render);
-  viewer.showPose(state?.pose, true);
+  viewer.showPose(state?.pose, true, state?.target, state?.base);
   $("reset-camera").disabled = false;
   $("reset-camera").addEventListener("click", viewer.resetCamera);
   render();

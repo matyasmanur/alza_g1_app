@@ -1,6 +1,6 @@
 # Unitree G1 Web App
 
-Use the web app to try arm motions and gestures for a 29-DoF Unitree G1. You can set the target angle of each of its 14 arm joints, play gestures such as a wave or handshake, and compare the commanded and measured poses in a live 3D view.
+Use the web app to try arm motions, gestures, and locomotion for a 29-DoF Unitree G1. You can set the target angle of each of its 14 arm joints, play or record gestures, and switch to walking in a live 3D view.
 
 Simulation mode uses the Unitree Python SDK to exchange commands and joint feedback with MuJoCo over DDS. Mock mode uses an in-process Python mock. Hardware mode displays measured joint positions from a physical G1 over DDS.
 
@@ -25,7 +25,7 @@ make build
 
 ### Simulation mode
 
-Simulation mode starts FastAPI and a MuJoCo subprocess in the same container. The subprocess runs the supported-base G1 model and exchanges commands and measured joint state with the backend via the Unitree Python SDK.
+Simulation mode starts FastAPI and a MuJoCo subprocess in the same container. The simulation starts in supported Arms mode and can switch to free-standing Locomotion. Both modes exchange commands and measurements with the backend via the Unitree Python SDK.
 
 ```bash
 make up web-sim
@@ -36,6 +36,14 @@ Open the web app in your browser.
 ```bash
 http://127.0.0.1:8001
 ```
+
+#### Walk the G1
+
+1. Click **Take control**, select **Locomotion**, and wait for the G1 to stand under the walking policy.
+2. Click **Enable motion**. Hold **W** or **S** to walk forward or backward, **A** or **D** to step sideways, and **Q** or **E** to turn. The on-screen buttons work the same way. Release the input to stop walking and balance in place.
+3. Select **Arms** to stop, restore pelvis support at the current location and heading, and return to the arm controls. Click **Enable motion** to use the sliders or gestures.
+
+**Stop motion** or **Esc** disables drive input. Use **Reset Stop** before enabling it again. If the robot falls, **Reset simulation** returns it to the starting position in Arms mode. Clear Stop before enabling the arms. The policy is trained for flat ground.
 
 #### Optional MuJoCo desktop viewer
 
@@ -91,7 +99,7 @@ http://127.0.0.1:8002
 
 ## Webapp Examples 
 
-All six recordings use simulation mode.
+All seven recordings use simulation mode.
 
 ### 1. Take control and move to Ready
 
@@ -129,6 +137,12 @@ With motion enabled and the arms settled, click **Release control**. The app mov
 
 ![Releasing control parks the G1 arms and returns the app to Observation](docs/media/6-release-control.gif)
 
+### 7. Drive the G1 in Locomotion mode
+
+Click **Take control**, select **Locomotion**, and then click **Enable motion**. Hold a direction button or its keyboard shortcut to walk or turn. Release it to stop and balance in place.
+
+![The G1 walking in MuJoCo under browser control](docs/media/7-locomotion.gif)
+
 ## Record a gesture
 
 In simulation or mock mode, take control, enable motion, and click **Record gesture**. Move the arms with the joint sliders, wait for them to settle, then click **Capture pose**. Repeat for each pose, enter a name, and click **Save gesture**.
@@ -137,7 +151,7 @@ The app saves one JSON file in `recorded_gestures/` and selects the gesture unde
 
 ## Run the SDK examples
 
-Keep `web-sim` running and leave the web app in **Observation** so the example has the arm command topic to itself. Open a shell in the simulator container from a second terminal.
+Keep `web-sim` running in **Arms** mode and release browser control so the example has the arm command topic to itself. Open a shell in the simulator container from a second terminal.
 
 ```bash
 make shell
@@ -159,16 +173,22 @@ Use `Ctrl+C` in the terminal to interrupt an SDK example. **Stop motion** in the
 
 ### Browser, backend, and simulator
 
-The browser uses HTML, CSS, plain JavaScript, and Three.js. FastAPI serves the UI and handles commands, acknowledgments, and live joint feedback over a WebSocket. In simulation mode, the Unitree Python SDK publishes arm setpoints to `rt/arm_sdk` and receives measured joint state from `rt/lowstate` over Cyclone DDS. The custom MuJoCo runner applies those commands to the Unitree G1 model with its pelvis welded to the world. The mock supplies feedback through the same transport interface.
+The browser uses HTML, CSS, plain JavaScript, and Three.js. FastAPI serves the UI and handles commands, acknowledgments, and live feedback over a WebSocket. FastAPI and the simulation communicate over Cyclone DDS through the Unitree Python SDK.
+
+- **Arms.** The SDK publishes setpoints on `rt/arm_sdk`. The simulator maintains pelvis support and returns joint measurements on `rt/lowstate`.
+- **Locomotion.** The backend calls the SDK's `LocoClient.SetVelocity` against the simulated `sport` service. Unitree's pretrained 29-DoF velocity policy reads `rt/lowstate` and publishes whole-body motor targets through the SDK on `rt/lowcmd`. The runner releases pelvis support and applies only policy targets while walking. The simulator publishes measured base pose on `rt/sportmodestate` for the browser view.
+- **Mode handoff.** The simulator's `g1_sim` SDK RPC handles switching and fall recovery. The simulator controls which command stream can move the robot. Browser controls wait for the simulator to report that the handoff is complete.
+
+The CPU policy runs at 50 Hz with ONNX Runtime. The Docker build fetches and verifies a pinned Unitree MJLab export and its deployment configuration. [Policy and deployment files](https://github.com/unitreerobotics/unitree_rl_mjlab/tree/1425b15f73bd4095f0df53709d7c389c3eb9e790/deploy/robots/g1/config/policy/velocity/v0)
 
 ### Local access and motion safeguards
 
 - **Local access.** Docker publishes the app and optional macOS viewer to loopback. The control WebSocket checks the request host and origin, and DDS runs on the container's loopback interface.
 - **Control ownership.** The backend grants control to one browser session at a time. The operator explicitly enables motion while feedback is fresh and the arms are stationary. Heartbeats renew the control lease. A disconnect or expired lease cancels motion and releases control.
 - **Command execution.** One backend control loop sends setpoints at up to 50 Hz. It enforces joint, speed, and acceleration limits. Simulation mode uses MuJoCo clearance checks when planning and during motion. New slider and gesture requests are blocked while a gesture is being planned or played.
-- **Stop and recovery.** The operator can click **Stop motion** or press **Esc** to cancel the current move. The controller decelerates, releases arm command authority, and latches Stop. Once motion settles and feedback is fresh, use **Reset Stop**, then **Enable motion** to resume. If commands time out, the simulator holds the measured arm pose.
+- **Stop and recovery.** **Stop motion** or **Esc** cancels the move and latches Stop. In Arms mode the controller decelerates and releases arm authority. In Locomotion it sends zero velocity and leaves the policy balancing. Drive commands expire after 250 ms, so closing or losing focus on the browser also stops walking. **Reset Stop** and **Enable motion** resume control.
 
-The supported-base simulation verifies arm motion and feedback. Firmware handover and free-standing balance still need hardware validation.
+The supported-base simulation verifies arm motion and feedback. The walking policy and mode handoff run in simulation. Physical G1 mode is observation-only.
 
 ### Command responsiveness
 
@@ -204,6 +224,12 @@ docker run --rm --network "container:$sim_container" \
 ```
 
 The runner prints the median and p95 in the terminal and writes the raw samples to `benchmark-results/latency.csv`.
+
+To verify walking and the Arms handoff in Chromium, start a fresh `web-sim` service, build the same verification image, then run its `locomotion` scenario in the simulator's network namespace.
+
+```bash
+docker run --rm --network "container:$sim_container" g1-web-verification locomotion
+```
 
 ### Reference documents
 

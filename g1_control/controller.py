@@ -8,15 +8,17 @@ from time import monotonic
 from typing import Callable
 
 from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, MAX_ACCELERATION, MAX_SPEED, PARKED, TARGET_MARGIN
-from g1_control.protocol import COMMAND_PERIOD, COMMAND_TIMEOUT
+from g1_control.protocol import COMMAND_PERIOD, COMMAND_TIMEOUT, ZERO_VELOCITY, SimMode
 from g1_control.trajectory import (
     MARGIN_METRES, READY, Clearance, Escape, Keyframe, PlanRequest, Segment, UnsafePath, path_issue, plan,
 )
-from g1_control.transport import Angles, ArmTransport, Feedback
+from g1_control.transport import Angles, ArmTransport, Feedback, LocomotionTransport, SimFeedback
 
 OPERATOR_TIMEOUT = 1.0
 VELOCITY_TOLERANCE = 0.10
 ZERO = (0.0,) * len(JOINT_NAMES)
+DRIVE_LIMITS = (0.35, 0.25, 0.5)
+MODE_TIMEOUT = 8.0
 
 
 class Motion(str, Enum):
@@ -24,6 +26,7 @@ class Motion(str, Enum):
     MANUAL = "manual"
     PLANNING = "planning"
     GESTURE = "gesture"
+    DRIVING = "driving"
     STOPPING = "stopping"
 
 
@@ -44,6 +47,8 @@ class Status:
     target: Angles | None
     fault: str | None
     gesture: str | None
+    sim: SimFeedback | None
+    switching: str | None
 
 
 def checked_target(joint: str, angle: float) -> float:
@@ -60,7 +65,7 @@ class MotionController:
     """Own the motion state and write at most one setpoint per tick."""
 
     def __init__(self, transport: ArmTransport, clock: Callable[[], float] = monotonic, *,
-                 clearance: Clearance | None = None) -> None:
+                 clearance: Clearance | None = None, locomotion: LocomotionTransport | None = None) -> None:
         self._transport = transport
         self._clock = clock
         self._last_tick = clock()
@@ -81,6 +86,11 @@ class MotionController:
         self._gesture: str | None = None
         self._release = False
         self._fault: str | None = None
+        self._locomotion = locomotion
+        self._sim: SimFeedback | None = None
+        self._mode_request: str | None = None
+        self._mode_deadline: float | None = None
+        self._drive_deadline = 0.0
 
     @property
     def status(self) -> Status:
@@ -90,7 +100,7 @@ class MotionController:
             connection = "connected" if self._fresh(self._clock()) else "stale"
         return Status(
             connection, self._owner, self._enabled, self._stop_latched,
-            self._motion, self._feedback, self._target, self._fault, self._gesture,
+            self._motion, self._feedback, self._target, self._fault, self._gesture, self._sim, self._mode_request,
         )
 
     def take_control(self, session: str) -> None:
@@ -112,11 +122,12 @@ class MotionController:
         if self._owner == session:
             self._owner = None
             self._cancel_motion()
+            self._cancel_prepare()
 
     def release(self, session: str) -> PlanRequest | None:
         """Park the arms before giving up control, or release at once when motion is disabled."""
         self._require_owner(session)
-        if not self._enabled:
+        if not self._enabled or not self._arm_mode():
             self.disconnect(session)
             return None
         return self.prepare_gesture(session, "Parking arms", (), PARKED, release=True)
@@ -124,10 +135,16 @@ class MotionController:
     def enable(self, session: str) -> None:
         """Seed a new motion session from a fresh, stationary measured pose."""
         self._require_owner(session)
-        if self._enabled or self._stop_latched or self._motion is Motion.STOPPING:
+        if self._enabled or self._stop_latched or self._motion is Motion.STOPPING or self._mode_request:
             raise Rejected("Motion cannot be enabled in the current state")
         if not self._fresh(self._clock()):
             raise Rejected("Robot feedback is unavailable")
+        if not self._arm_mode():
+            if self._sim.mode is not SimMode.LOCOMOTION:
+                raise Rejected("Wait for the simulator mode to be ready")
+            self._fault = None
+            self._enabled = True
+            return
         feedback = self._feedback
         if any(abs(v) > VELOCITY_TOLERANCE for v in feedback.velocity):
             raise Rejected("Wait until the arms settle before enabling")
@@ -154,6 +171,39 @@ class MotionController:
                     raise Rejected(issue)
         self._target = goal
         self._motion = Motion.MANUAL
+
+    def select_mode(self, session: str, mode: str) -> None:
+        self._require_owner(session)
+        if self._locomotion is None or not self._fresh(self._clock()):
+            raise Rejected("Simulator locomotion is unavailable")
+        if self._mode_request or self._sim.mode.changing or self._motion is Motion.STOPPING:
+            raise Rejected("Wait for the current mode change to finish")
+        if mode == "reset" and self._sim.mode is SimMode.FALLEN:
+            self._mode_request = mode
+            return
+        if mode not in ("arms", "locomotion"):
+            raise Rejected("Invalid simulator mode")
+        if self._stop_latched or self._sim.mode is SimMode.FALLEN:
+            raise Rejected("Reset Stop before changing modes")
+        if self._sim.mode.name.lower() != mode:
+            self._cancel_motion()
+            self._fault = None
+            self._mode_request = mode
+
+    def drive(self, session: str, velocity: list) -> None:
+        self._require_owner(session)
+        now = self._clock()
+        if (self._locomotion is None or not self._fresh(now) or self._sim.mode is not SimMode.LOCOMOTION
+                or not self._enabled or self._mode_request):
+            raise Rejected("Enable motion in Locomotion mode to drive")
+        if (not isinstance(velocity, list) or len(velocity) != 3
+                or any(type(v) not in (int, float) or not -limit <= v <= limit
+                       for v, limit in zip(velocity, DRIVE_LIMITS))):
+            raise Rejected("Invalid locomotion velocity")
+        command = tuple(float(v) for v in velocity)
+        self._locomotion.set_velocity(command)
+        self._drive_deadline = now + COMMAND_TIMEOUT
+        self._motion = Motion.DRIVING if any(command) else Motion.IDLE
 
     def start_gesture(self, session: str, waypoints: tuple[Angles, ...]) -> None:
         """Plan and start a sequence synchronously for non-web callers."""
@@ -224,11 +274,17 @@ class MotionController:
         self._require_owner(session)
         self._stop_latched = True
         self._cancel_motion()
+        self._cancel_prepare()
+        if self._sim is not None and self._sim.mode is SimMode.LOCOMOTION:
+            self._motion = Motion.STOPPING
+            self._drive_deadline = self._clock() + COMMAND_TIMEOUT
 
     def reset_stop(self, session: str) -> None:
         """Clear the Stop latch after deceleration, leaving motion disabled."""
         self._require_owner(session)
-        if not self._stop_latched or self._motion is Motion.STOPPING or not self._fresh(self._clock()):
+        if (not self._stop_latched or self._motion is Motion.STOPPING or not self._fresh(self._clock())
+                or self._mode_request or self._sim is not None and
+                (self._sim.mode.changing or self._sim.mode is SimMode.FALLEN)):
             raise Rejected("Stop can only be reset with fresh feedback after deceleration")
         self._stop_latched = False
 
@@ -244,17 +300,28 @@ class MotionController:
                 feedback_interrupted = sample.received_at - self._feedback.received_at >= COMMAND_TIMEOUT
             self._feedback = sample
 
+        if self._locomotion is not None:
+            self._refresh_sim()
+
         if feedback_interrupted or not self._fresh(now):
             if self._owner is not None or self._motion is Motion.STOPPING:
                 self._disarm_fault("Robot feedback is stale")
             return
         if self._owner is not None and now >= self._owner_deadline:
             self.disconnect(self._owner)
-        if interval <= 0 or not (self._enabled or self._motion is Motion.STOPPING):
-            return
-        if interval >= COMMAND_TIMEOUT:
-            # The simulator may have entered its own hold while the loop was stalled.
+        if interval >= COMMAND_TIMEOUT and (self._enabled or self._motion is Motion.STOPPING):
             self._disarm_fault("Control loop missed the command timeout")
+            return
+        if self._locomotion is not None:
+            self._update_mode(now)
+            if not self._arm_mode():
+                if self._motion is Motion.DRIVING and now >= self._drive_deadline:
+                    self._motion = Motion.IDLE
+                elif (self._motion is Motion.STOPPING and now >= self._drive_deadline
+                      and self._sim.stationary):
+                    self._motion = Motion.IDLE
+                return
+        if interval <= 0 or not (self._enabled or self._motion is Motion.STOPPING):
             return
 
         elapsed = min(COMMAND_PERIOD, interval)
@@ -299,7 +366,57 @@ class MotionController:
         return Escape(MARGIN_METRES + 0.002), Escape(0.0015)
 
     def _fresh(self, now: float) -> bool:
-        return self._feedback is not None and now - self._feedback.received_at < COMMAND_TIMEOUT
+        return (self._feedback is not None and now - self._feedback.received_at < COMMAND_TIMEOUT
+                and (self._locomotion is None or
+                     self._sim is not None and now - self._sim.received_at < COMMAND_TIMEOUT))
+
+    def _arm_mode(self) -> bool:
+        return self._locomotion is None or self._sim is not None and self._sim.mode is SimMode.ARMS
+
+    def _refresh_sim(self) -> None:
+        sample = self._locomotion.read()
+        if sample is None:
+            return
+        if self._sim is not None and sample.mode is not self._sim.mode:
+            if self._enabled:
+                self._cancel_motion()
+                self._motion = Motion.IDLE
+            if sample.mode is SimMode.FALLEN:
+                self._stop_latched = True
+                self._mode_request = self._mode_deadline = None
+                self._motion = Motion.IDLE
+                self._fault = "Locomotion stopped. Reset the simulation to recover."
+        self._sim = sample
+
+    def _update_mode(self, now: float) -> None:
+        error = self._locomotion.take_error()
+        if error is not None:
+            kind, reason = error
+            if kind == "mode" or self._mode_request is None and self._enabled and not self._arm_mode():
+                self._cancel_motion()
+                self._mode_request = self._mode_deadline = None
+                self._fault = reason
+        if self._mode_request is None or self._motion is Motion.STOPPING:
+            return
+        target = SimMode.LOCOMOTION if self._mode_request == "locomotion" else SimMode.ARMS
+        if self._mode_deadline is None:
+            self._locomotion.set_mode(self._mode_request)
+            self._mode_deadline = now + MODE_TIMEOUT
+        elif self._sim.mode is target:
+            if self._mode_request == "reset":
+                self._fault = None
+            self._mode_request = self._mode_deadline = None
+        elif now >= self._mode_deadline:
+            self._mode_request = self._mode_deadline = None
+            self._fault = "Simulator mode change did not finish"
+
+    def _cancel_prepare(self) -> None:
+        if self._mode_request == "locomotion" or self._sim is not None and self._sim.mode is SimMode.PREPARING:
+            if self._mode_deadline is None and self._arm_mode():
+                self._mode_request = None
+            else:
+                self._mode_request = "arms"
+                self._mode_deadline = None
 
     def _require_owner(self, session: str) -> None:
         if self._owner != session or self._clock() >= self._owner_deadline:
@@ -309,10 +426,16 @@ class MotionController:
         self._require_owner(session)
         if not self._enabled or not self._fresh(self._clock()):
             raise Rejected("Motion is disabled or robot feedback is stale")
+        if not self._arm_mode() or self._mode_request is not None:
+            raise Rejected("Arm controls are unavailable in Locomotion mode")
 
     def _cancel_motion(self) -> None:
         if self._enabled:
-            self._motion = Motion.STOPPING
+            if self._arm_mode():
+                self._motion = Motion.STOPPING
+            else:
+                self._locomotion.set_velocity(ZERO_VELOCITY)
+                self._motion = Motion.IDLE
         self._enabled = False
         self._target = None
         self._plan = None
@@ -322,6 +445,7 @@ class MotionController:
 
     def _disarm_fault(self, reason: str) -> None:
         self._cancel_motion()
+        self._cancel_prepare()
         self._owner = None
         self._motion = Motion.IDLE
         self._fault = reason
