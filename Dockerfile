@@ -55,6 +55,18 @@ RUN mkdir -p /opt/web-assets/vendor /tmp/three \
 COPY g1_control/export_model.py /tmp/export_model.py
 RUN python /tmp/export_model.py /tmp/unitree/unitree_robots/g1/g1_29dof.xml /opt/web-assets
 
+FROM g1-model AS g1-policy
+WORKDIR /opt/g1-policy
+RUN source=https://raw.githubusercontent.com/unitreerobotics/unitree_rl_mjlab/1425b15f73bd4095f0df53709d7c389c3eb9e790/deploy/robots/g1/config/policy/velocity/v0 \
+    && curl --fail --silent --show-error --location "$source/exported/policy.onnx" --output policy.onnx \
+    && curl --fail --silent --show-error --location "$source/params/deploy.yaml" --output deploy.yaml \
+    && curl --fail --silent --show-error --location \
+        https://raw.githubusercontent.com/unitreerobotics/unitree_rl_mjlab/1425b15f73bd4095f0df53709d7c389c3eb9e790/LICENCE --output LICENSE \
+    && sha256sum --check <<'CHECKSUMS'
+2a66ca6336eadb3c0b34b557763f3e06d01ff8fcf6260dd4cedbd69d6093fc28  policy.onnx
+01e1cf3f6ec44e9942494fbb4a9904df07201e14e5551a277f38d7c1bda28d  deploy.yaml
+CHECKSUMS
+
 FROM python:3.10-slim AS mock
 WORKDIR /work
 COPY requirements-web.txt /tmp/requirements-web.txt
@@ -63,8 +75,9 @@ COPY --from=web-assets /opt/web-assets /opt/web-assets
 
 FROM arm-sim AS web-sim
 COPY requirements-web.txt /tmp/requirements-web.txt
-RUN pip install --no-cache-dir -r /tmp/requirements-web.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-web.txt onnxruntime==1.22.1 PyYAML==6.0.2
 COPY --from=web-assets /opt/web-assets /opt/web-assets
+COPY --from=g1-policy /opt/g1-policy /opt/g1-policy
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     libgl1-mesa-dri libglx-mesa0 libx11-6 libxcursor1 libxi6 libxinerama1 libxrandr2 \

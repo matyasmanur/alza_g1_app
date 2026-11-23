@@ -1,4 +1,4 @@
-"""Run supported-base G1 physics with a minimal Unitree arm DDS endpoint.
+"""Run G1 physics with Unitree arm and optional locomotion DDS endpoints.
 
 The physics loop owns MuJoCo data and has a local hold target. The DDS
 callback only replaces the latest valid command. Arm weight blends user
@@ -43,15 +43,25 @@ DEFAULT_MODEL = Path("/opt/unitree_mujoco/unitree_robots/g1/g1_29dof.xml")
 ARMS = slice(ARM_START, ARM_END)
 
 
-def load_supported_model(path: Path) -> mujoco.MjModel:
-    """Add a pelvis-to-world weld while keeping the stock actuator order."""
+def load_supported_model(path: Path, *, walking: bool = False) -> mujoco.MjModel:
+    """Add pelvis support while keeping the stock actuator order."""
     root = ElementTree.parse(path).getroot()
     compiler = root.find("compiler")
     compiler.set("meshdir", str(path.resolve().parent / compiler.attrib["meshdir"]))
     constraints = root.find("equality")
     if constraints is None:
         constraints = ElementTree.SubElement(root, "equality")
-    ElementTree.SubElement(constraints, "weld", name="support_stand", body1="pelvis")
+    if walking:
+        scene = ElementTree.parse(path.with_name("scene_29dof.xml")).getroot()
+        for group in ("asset", "worldbody"):
+            root.find(group).extend(scene.find(group))
+        root.extend(scene.findall("statistic") + scene.findall("visual"))
+        world = root.find("worldbody")
+        pelvis = world.find("body[@name='pelvis']")
+        ElementTree.SubElement(world, "body", name="support_anchor", mocap="true", pos=pelvis.attrib["pos"])
+        ElementTree.SubElement(constraints, "weld", name="support_stand", body1="pelvis", body2="support_anchor")
+    else:
+        ElementTree.SubElement(constraints, "weld", name="support_stand", body1="pelvis")
     model = mujoco.MjModel.from_xml_string(ElementTree.tostring(root, encoding="unicode"))
     if model.nu != ARM_END:
         raise ValueError("The scene does not match the 29-DoF G1 DDS actuator order")
@@ -99,16 +109,18 @@ class ArmPlant:
             user_torque += kd * (velocity - velocities[ARMS])
             torque[ARMS] = (1 - weight) * torque[ARMS] + weight * user_torque
 
-        self.data.ctrl[:] = np.clip(
-            torque, self.model.actuator_ctrlrange[:, 0], self.model.actuator_ctrlrange[:, 1]
-        )
+        self.apply_torque(torque)
+
+    def apply_torque(self, torque: np.ndarray) -> None:
+        low, high = self.model.actuator_ctrlrange.T
+        self.data.ctrl[:] = np.clip(torque, low, high)
         mujoco.mj_step(self.model, self.data)
 
 
 class ArmSimulator:
     """Exchange arm commands and measured joint state through Unitree DDS."""
 
-    def __init__(self, model: mujoco.MjModel) -> None:
+    def __init__(self, model: mujoco.MjModel, *, walking: bool = False) -> None:
         self.plant = ArmPlant(model)
         self.lock = Lock()
         self.latest = None
@@ -119,6 +131,11 @@ class ArmSimulator:
         self.publisher.Init()
         self.subscriber = ChannelSubscriber(ARM_TOPIC, LowCmd_)
         self.subscriber.Init(self.on_command, 1)
+        self.locomotion = None
+        if walking:
+            from g1_control.sim_locomotion import SimLocomotion
+
+            self.locomotion = SimLocomotion(self.plant)
 
     def on_command(self, message: LowCmd_) -> None:
         """Accept a CRC-checked arm command without touching the physics state."""
@@ -144,25 +161,36 @@ class ArmSimulator:
             state = self.state.motor_state[index]
             state.q = float(plant.data.qpos[q_index])
             state.dq = float(plant.data.qvel[dq_index])
+        if self.locomotion is not None:
+            self.locomotion.fill_imu(self.state.imu_state)
         self.state.tick = round(plant.data.time * 1000) % (2**32)
         self.state.crc = self.crc.Crc(self.state)
         self.publisher.Write(self.state)
+        if self.locomotion is not None:
+            self.locomotion.publish_state(self.state.tick)
 
     def run(self, render: Callable[[], None] | None = None) -> None:
         """Advance physics at the model timestep and publish at 50 Hz."""
-        deadline = next_state = monotonic()
+        deadline = monotonic()
         step_period = self.plant.model.opt.timestep
-        print(f"Supported G1 ready on {INTERFACE}, DDS domain {DOMAIN_ID}")
+        steps_per_state = round(COMMAND_PERIOD / step_period)
+        step_count = 0
+        print(f"G1 {'arms and locomotion' if self.locomotion else 'arms'} ready on {INTERFACE}, DDS domain {DOMAIN_ID}")
         while True:
             now = monotonic()
-            with self.lock:
-                command = self.latest
-            self.plant.step(now, command)
-            if now >= next_state:
+            if self.locomotion is not None and self.locomotion.step(now):
+                with self.lock:
+                    self.latest = None
+            else:
+                with self.lock:
+                    command = self.latest
+                self.plant.step(now, command)
+            step_count += 1
+            if step_count == steps_per_state:
                 self.publish_state()
                 if render is not None:
                     render()
-                next_state = now + COMMAND_PERIOD
+                step_count = 0
             deadline = max(deadline + step_period, now)
             sleep(max(0, deadline - monotonic()))
 
@@ -174,6 +202,7 @@ def run_with_viewer(simulator: ArmSimulator) -> None:
     plant = simulator.plant
     model = copy(plant.model)
     data = mujoco.MjData(model)
+    previous_xy = plant.data.qpos[:2].copy()
     with launch_passive(model, data) as viewer:
         with viewer.lock():
             viewer.cam.lookat[:] = plant.data.qpos[:3]
@@ -183,8 +212,11 @@ def run_with_viewer(simulator: ArmSimulator) -> None:
 
         def render() -> None:
             if viewer.is_running():
-                data.qpos[:] = plant.data.qpos
-                data.time = plant.data.time
+                with viewer.lock():
+                    data.qpos[:] = plant.data.qpos
+                    data.time = plant.data.time
+                    viewer.cam.lookat[:2] += data.qpos[:2] - previous_xy
+                    previous_xy[:] = data.qpos[:2]
                 viewer.sync(state_only=True)
 
         simulator.run(render)
@@ -194,9 +226,11 @@ def main() -> None:
     """Start the simulator on a Docker-local loopback interface."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL)
-    model = load_supported_model(parser.parse_args().model)
+    parser.add_argument("--locomotion", action="store_true")
+    args = parser.parse_args()
+    model = load_supported_model(args.model, walking=args.locomotion)
     ChannelFactoryInitialize(DOMAIN_ID, INTERFACE)
-    simulator = ArmSimulator(model)
+    simulator = ArmSimulator(model, walking=args.locomotion)
     if os.environ.get("G1_SIM_VIEWER") == "1":
         run_with_viewer(simulator)
     else:
