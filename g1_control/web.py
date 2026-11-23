@@ -21,7 +21,7 @@ from g1_control.controller import Motion, MotionController, Rejected
 from g1_control.gestures import MAX_RECORDED_POSES, load_gestures, save_recording
 from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, PARKED, TARGET_MARGIN
 from g1_control.latency import LatencyTrace
-from g1_control.protocol import COMMAND_PERIOD
+from g1_control.protocol import COMMAND_PERIOD, SimMode
 from g1_control.trajectory import PlanRequest, UnsafePath
 from g1_control.transport import Angles
 
@@ -50,6 +50,11 @@ def state_for(controller: MotionController, session: str) -> dict:
         "control_taken": state.owner is not None, "enabled": state.enabled, "motion": state.motion.value,
         "stop_latched": state.stop_latched, "fault": state.fault, "target": state.target, "gesture": state.gesture,
         "pose": None if state.measured is None else state.measured.lower_position + state.measured.position,
+        "mode": "arms" if state.sim is None else state.sim.mode.name.lower(),
+        "switching": state.switching,
+        "base": None if state.sim is None else {
+            "position": state.sim.position, "quaternion": state.sim.quaternion, "velocity": state.sim.velocity,
+        },
     }
 
 
@@ -86,6 +91,9 @@ def handle_command(controller: MotionController, session: str, message: tuple[st
         if action == "save_recording":
             if controller.status.owner != session:
                 raise Rejected("Take control to save a recording")
+            state = controller.status
+            if state.switching or state.sim is not None and state.sim.mode is not SimMode.ARMS:
+                raise Rejected("Return to Arms mode to save the recording")
             try:
                 slug, gesture = save_recording(command.get("name"), recording)
             except ValueError as error:
@@ -126,6 +134,12 @@ def handle_command(controller: MotionController, session: str, message: tuple[st
                     trace.start(session, command_id, JOINT_NAMES.index(joint), angle, before.measured, received_at)
                 else:
                     trace.cancel(session)
+        elif action == "set_mode":
+            controller.select_mode(session, command.get("mode"))
+            if trace is not None:
+                trace.cancel(session)
+        elif action == "drive":
+            controller.drive(session, command.get("velocity"))
         else:
             actions = {
                 "take_control": controller.take_control, "enable": controller.enable,
@@ -173,16 +187,18 @@ def create_app(backend: str, *, dds_interface: str = "", dds_domain: int = 0) ->
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        simulator = worker = None
+        simulator = worker = locomotion = None
         clearance = None
         try:
             if backend == "sim":
                 from g1_control.clearance import MujocoClearance
                 from g1_control.dds_transport import DdsTransport
+                from g1_control.locomotion_transport import DdsLocomotion
 
                 clearance = MujocoClearance()
-                simulator = subprocess.Popen([sys.executable, "-m", "g1_control.simulator"])
+                simulator = subprocess.Popen([sys.executable, "-m", "g1_control.simulator", "--locomotion"])
                 transport = DdsTransport(trace)
+                locomotion = DdsLocomotion()
             elif read_only:
                 from g1_control.dds_transport import DdsObservation
 
@@ -191,7 +207,7 @@ def create_app(backend: str, *, dds_interface: str = "", dds_domain: int = 0) ->
                 from g1_control.mock import MockTransport
 
                 transport = MockTransport(position=PARKED)
-            app.state.controller = MotionController(transport, clearance=clearance)
+            app.state.controller = MotionController(transport, clearance=clearance, locomotion=locomotion)
             worker = asyncio.create_task(run_controller(app.state.controller))
             yield
         finally:
@@ -199,6 +215,8 @@ def create_app(backend: str, *, dds_interface: str = "", dds_domain: int = 0) ->
                 worker.cancel()
                 with suppress(asyncio.CancelledError):
                     await worker
+            if locomotion is not None:
+                locomotion.close()
             if simulator is not None and simulator.poll() is None:
                 simulator.terminate()
                 simulator.wait(timeout=5)
@@ -216,6 +234,7 @@ def create_app(backend: str, *, dds_interface: str = "", dds_domain: int = 0) ->
         return {
             "backend": backend,
             "read_only": read_only,
+            "locomotion": backend == "sim",
             "joints": [{"name": name, "min": low + TARGET_MARGIN, "max": high - TARGET_MARGIN}
                        for name, (low, high) in JOINT_LIMITS.items()],
             "gestures": [] if read_only else [

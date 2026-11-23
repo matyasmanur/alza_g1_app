@@ -5,7 +5,8 @@ import unittest
 from g1_control.controller import Motion, MotionController, Rejected
 from g1_control.joints import JOINT_LIMITS, JOINT_NAMES, MAX_ACCELERATION, MAX_SPEED, PARKED, TARGET_MARGIN
 from g1_control.mock import MockTransport
-from g1_control.protocol import COMMAND_PERIOD, COMMAND_TIMEOUT
+from g1_control.protocol import COMMAND_PERIOD, COMMAND_TIMEOUT, ZERO_VELOCITY, SimMode
+from g1_control.transport import SimFeedback
 
 ELBOW = JOINT_NAMES.index("left_elbow")
 
@@ -34,6 +35,26 @@ class RecordingMock(MockTransport):
         self.writes.append((position, velocity, enabled))
 
 
+class MockLocomotion:
+    def __init__(self, clock):
+        self.clock = clock
+        self.mode = SimMode.ARMS
+        self.modes = []
+        self.velocities = []
+
+    def read(self):
+        return SimFeedback(self.clock(), self.mode, (0, 0, 0.793), (1, 0, 0, 0), ZERO_VELOCITY, 0.0)
+
+    def set_mode(self, mode):
+        self.modes.append(mode)
+
+    def set_velocity(self, velocity):
+        self.velocities.append(velocity)
+
+    def take_error(self):
+        return None
+
+
 class ControllerTests(unittest.TestCase):
     def setUp(self):
         self.clock = Clock()
@@ -54,6 +75,58 @@ class ControllerTests(unittest.TestCase):
 
     def pose(self, elbow):
         return tuple(elbow if i == ELBOW else 0.0 for i in range(len(JOINT_NAMES)))
+
+    def test_locomotion_waits_for_arm_release_and_requires_a_new_enable(self):
+        sim = MockLocomotion(self.clock)
+        self.controller = MotionController(self.mock, self.clock, locomotion=sim)
+        self.enable()
+        self.controller.set_joint("operator", "left_elbow", 0.35)
+        self.advance(5)
+        self.controller.select_mode("operator", "locomotion")
+        self.advance()
+        self.assertEqual(sim.modes, [])
+        self.advance(20)
+        self.assertFalse(self.mock.writes[-1][2])
+        self.assertEqual(sim.modes, ["locomotion"])
+        with self.assertRaises(Rejected):
+            self.controller.enable("operator")
+
+        sim.mode = SimMode.LOCOMOTION
+        self.advance()
+        with self.assertRaises(Rejected):
+            self.controller.drive("operator", [0.3, 0, 0])
+        self.controller.enable("operator")
+        with self.assertRaises(Rejected):
+            self.controller.set_joint("operator", "left_elbow", 0.35)
+        with self.assertRaises(Rejected):
+            self.controller.drive("operator", [0.36, 0, 0])
+
+        writes = len(self.mock.writes)
+        self.controller.drive("operator", [0.3, 0, 0])
+        self.advance(15)
+        self.assertEqual(sim.velocities, [(0.3, 0.0, 0.0)])
+        self.assertIs(self.controller.status.motion, Motion.IDLE)
+        self.assertEqual(len(self.mock.writes), writes)
+        self.controller.disconnect("operator")
+        self.assertEqual(sim.velocities[-1], ZERO_VELOCITY)
+
+    def test_stop_cancels_preparation_and_requires_a_reset(self):
+        sim = MockLocomotion(self.clock)
+        self.controller = MotionController(self.mock, self.clock, locomotion=sim)
+        self.enable()
+        self.controller.select_mode("operator", "locomotion")
+        self.advance(2)
+        sim.mode = SimMode.PREPARING
+        self.advance()
+        self.controller.stop("operator")
+        self.advance()
+        self.assertEqual(sim.modes, ["locomotion", "arms"])
+        with self.assertRaises(Rejected):
+            self.controller.reset_stop("operator")
+        sim.mode = SimMode.ARMS
+        self.advance()
+        self.controller.reset_stop("operator")
+        self.assertFalse(self.controller.status.enabled)
 
     def test_observe_claim_enable_and_exclusive_writes(self):
         self.assertEqual(self.controller.status.connection, "waiting")
