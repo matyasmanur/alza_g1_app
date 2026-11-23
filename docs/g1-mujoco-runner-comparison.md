@@ -6,10 +6,10 @@ The original demo needed to exercise the G1 arm interface, `rt/arm_sdk`, with li
 
 | | Official Unitree MuJoCo | This project simulation |
 |---|---|---|
-| Command input | Receives SDK `LowCmd_` on `rt/lowcmd` and applies commands to the loaded model's actuators. | Receives the same G1 message type on `rt/arm_sdk`. It reads the 14 arm targets and the arm-authority weight. |
-| Physics | The official bridge computes actuator inputs and the official runner steps MuJoCo. | `g1_control/simulator.py` blends commanded arm torques with a local hold, writes directly to MuJoCo's `data.ctrl`, and calls `mj_step()`. No message is published to `rt/lowcmd`. |
-| Feedback | Publishes `rt/lowstate`. The documented bridge interfaces also include base position and velocity and, for the G1 C++ bridge, torso IMU. | Publishes positions and velocities for all 29 modeled joints on `rt/lowstate`. The web app uses those angles for its 3D view. |
-| Scene and config | Uses the upstream scene and runner configuration. Its G1 scene adds a floor and visual settings around the robot model. | Loads the pinned `g1_29dof.xml` model directly, adds a pelvis weld, and holds the legs and waist near their initial pose. The upstream config, terrain, and joystick integration are outside this run path. |
+| Command input | Receives SDK `LowCmd_` on `rt/lowcmd` and applies commands to the loaded model's actuators. | Accepts arm targets and the arm-authority weight on `rt/arm_sdk` in Arms mode. In Locomotion mode the simulated `sport` service accepts SDK velocity requests and the walking policy publishes `rt/lowcmd`. |
+| Physics | The official bridge computes actuator inputs and the official runner steps MuJoCo. | The custom runner blends arm torques with a local hold in Arms mode and applies policy motor targets in Locomotion mode. |
+| Feedback | Publishes `rt/lowstate`. The documented bridge interfaces also include base position and velocity and, for the G1 C++ bridge, torso IMU. | Publishes joint feedback and pelvis IMU in `rt/lowstate`, plus base pose and velocity on `rt/sportmodestate`. The browser uses both streams for the 3D view. |
+| Scene and config | Uses the upstream scene and runner configuration. Its G1 scene adds a floor and visual settings around the robot model. | Uses the pinned G1-29 floor scene with a switchable pelvis weld. The weld supports Arms mode and releases for free-standing Locomotion. |
 
 
 
@@ -36,7 +36,7 @@ The web app controls the 14 arm joints on the 29-DoF G1. Unitree's G1 arm exampl
 
 The custom runner receives `rt/arm_sdk` directly and uses the weight to blend arm commands with a local hold. It publishes measured joint positions and velocities on `rt/lowstate`, so the web app and SDK examples can send arm targets and observe the resulting motion through the same DDS topics. The pelvis weld and lower-body hold keep the G1 supported so the test can focus on the arms. 
 
-When the sender releases arm authority or goes 250 ms without a fresh command, the runner captures and holds the measured arm pose. This gives the project a way to test command release and command loss in simulation. The physical G1's firmware handoff and timeout behavior still require hardware verification. 
+When the sender releases arm authority or goes 250 ms without a fresh command, the runner captures and holds the measured arm pose. In Locomotion mode it runs Unitree's pretrained 29-DoF velocity policy and sends zero velocity to the policy when a drive command expires. The SDK-based `g1_sim` service lets the web app switch modes and recover after a fall. [Simulation controls](../README.md#walk-the-g1)
 
 ## G1 SDK and simulator coverage
 
@@ -47,7 +47,7 @@ When the sender releases arm authority or goes 250 ms without a fresh command, t
 | **Low-level motor control** | `unitree_hg.LowCmd_` carries position, velocity, gains, and feedforward torque. Hardware control mode and joint layout matter. | Supports `rt/lowcmd` for actuators in the loaded model. To exercise the `rt/arm_sdk` authority blend or the `rt/user_lowcmd` handoff, use an implementation of the corresponding interface. |
 | **Joint state, IMU, and base telemetry** | `LowState_` carries joint and onboard state. The G1 also exposes torso IMU and sport-state interfaces. | Publishes modeled motor feedback and available sensor data. The C++ bridge supplies `rt/secondary_imu` for the G1. The Python bridge uses the `unitree_go` sport-state type. Hardware-specific fields can be defaults or simulated values. |
 | **Factory gestures and custom actions** | Python exposes preset execution and listing. C++ also exposes named custom action execution and stopping. | Executing factory action IDs requires the G1 firmware's `arm` service. See [G1 factory gestures](#g1-factory-gestures). |
-| **High-level locomotion and mode changes** | G1 `LocoClient` provides velocity, standing, balance, and mode requests. The motion-switcher runs as a robot-side service. | The bridge supplies sport-state telemetry. Walking in MuJoCo requires a controller or policy that supplies commands to the modeled joints. Testing calls such as `LocoClient.Move()` or firmware mode changes also requires a compatible service. [ |
+| **High-level locomotion and mode changes** | G1 `LocoClient` provides velocity, standing, balance, and mode requests. The motion-switcher runs as a robot-side service. | The bridge supplies sport-state telemetry. A compatible service and walking policy are needed to run a request such as `LocoClient.Move()`. |
 | **Audio and RGB LED** | G1 `AudioClient` calls the `voice` service for TTS, PCM playback, volume, and RGB LED control. Unitree's microphone example receives raw PCM over UDP multicast. | Testing these interfaces requires a separate voice service or microphone stream and a compatible audio or LED backend. |
 | **Camera and video** | The Python `VideoClient.GetImageSample()` example targets Go2. G1 compatibility with that client remains unverified. Unitree's G1 teleoperation stack documents a separate image server. | The MuJoCo viewport renders the scene. Testing a camera client requires a compatible image server. Unitree Isaac Lab streams simulated camera frames through Teleimager over ZMQ or WebRTC. |
 | **Hands and grippers** | SDK message types and Unitree's Dex3 example expose finger commands and feedback. Hand features depend on the fitted device. | Testing Dex3 commands requires a hand-equipped scene and a bridge that implements the corresponding DDS topics. Unitree Isaac Lab documents both. |
