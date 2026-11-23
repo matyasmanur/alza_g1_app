@@ -200,7 +200,7 @@ body[data-mode="offline"] .viewport canvas { filter: grayscale(1) brightness(.6)
 .session-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 0 18px 12px; padding: 3px; background: #0a111e; border-radius: 9px; }
 .tabs button { min-height: 32px; background: transparent; color: var(--muted); }
-.tabs button[aria-pressed="true"] { background: var(--raised); color: var(--blue); }
+.tabs button[aria-pressed="true"] { background: var(--raised); color: var(--blue); opacity: 1; }
 .drive-controls { padding: 0 18px 16px; }
 .drive-pad { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
 .drive-pad button { min-width: 0; min-height: 54px; padding: 6px 2px; touch-action: none; user-select: none; }
