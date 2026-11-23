@@ -41,10 +41,22 @@ export function createPosePreview(canvas, robots) {
   }
 
   const point = new Vector3();
-  return camera => {
+  return (camera, focus) => {
     const { width, height } = canvas;
     context.fillStyle = "#0c1524";
     context.fillRect(0, 0, width, height);
+    // A fixed world grid shows translation even while the camera follows the base.
+    const gridX = Math.round(focus.x * 2);
+    const gridZ = Math.round(focus.z * 2);
+    context.fillStyle = "#34496a";
+    for (let x = gridX - 10; x <= gridX + 10; x++) {
+      for (let z = gridZ - 10; z <= gridZ + 10; z++) {
+        point.set(x / 2, -0.012, z / 2).project(camera);
+        if (Math.abs(point.z) <= 1 && Math.abs(point.x) <= 1 && Math.abs(point.y) <= 1) {
+          context.fillRect((point.x + 1) * width / 2, (1 - point.y) * height / 2, 2, 2);
+        }
+      }
+    }
     const outlines = [];
     for (const { object, robot, points } of links) {
       if (!robot.visible) continue;

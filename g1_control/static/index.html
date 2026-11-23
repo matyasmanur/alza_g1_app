@@ -3,17 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>G1 Arm Console</title>
+  <title>G1 Console</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%235b9dff'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='monospace' font-weight='700' font-size='15' fill='%2306101f'%3EG1%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <script type="importmap">{"imports":{"three":"/assets/vendor/three.module.min.js"}}</script>
-  <script type="module" src="/static/app.js?v=5"></script>
+  <script type="module" src="/static/app.js?v=6"></script>
 </head>
 <body data-mode="offline">
   <header class="topbar">
     <div class="brand">
       <span class="mark" aria-hidden="true">G1</span>
-      <div><h1>Arm Console</h1><span id="backend" class="source">Connecting</span></div>
+      <div><h1>G1 Console</h1><span id="backend" class="source">Connecting</span></div>
     </div>
     <section class="status" aria-label="Robot status">
       <div><span>Connection</span><strong id="connection" data-tone="neutral">Waiting</strong></div>
@@ -60,6 +60,10 @@
     <div class="panel">
       <section class="card controls" aria-labelledby="controls-title">
         <div class="card-title"><h2 id="controls-title">Arm controls</h2><span id="lock" class="units">Degrees</span></div>
+        <div id="control-modes" class="tabs" role="group" aria-label="Control mode" hidden>
+          <button type="button" data-control-mode="arms" aria-pressed="true" disabled>Arms</button>
+          <button type="button" data-control-mode="locomotion" aria-pressed="false" disabled>Locomotion</button>
+        </div>
         <div class="session">
           <ol id="steps" class="steps" aria-label="Arming sequence">
             <li>Control</li><li>Enable</li><li>Move</li>
@@ -68,15 +72,29 @@
             <button id="take-control" class="primary" type="button" disabled>Take control</button>
             <button id="enable" class="primary" type="button" hidden>Enable motion</button>
             <button id="reset-stop" class="primary" type="button" hidden>Reset Stop</button>
+            <button id="reset-sim" class="primary" type="button" hidden>Reset simulation</button>
             <button id="release-control" class="secondary" type="button" hidden>Release control</button>
           </div>
         </div>
-        <div class="tabs" role="group" aria-label="Arm to control">
-          <button type="button" data-side="left" aria-pressed="true">Left arm</button>
-          <button type="button" data-side="right" aria-pressed="false">Right arm</button>
+        <div id="arm-controls">
+          <div class="tabs" role="group" aria-label="Arm to control">
+            <button type="button" data-side="left" aria-pressed="true">Left arm</button>
+            <button type="button" data-side="right" aria-pressed="false">Right arm</button>
+          </div>
+          <div class="columns"><span>Joint · limits</span><span class="target">Target</span><span class="measured">Measured</span></div>
+          <div id="joints"></div>
         </div>
-        <div class="columns"><span>Joint · limits</span><span class="target">Target</span><span class="measured">Measured</span></div>
-        <div id="joints"></div>
+        <div id="drive-controls" class="drive-controls" hidden>
+          <p id="drive-hint" class="units">Hold a button or key to move.</p>
+          <div class="drive-pad" role="group" aria-label="Drive commands" aria-describedby="drive-hint">
+            <button class="secondary" type="button" data-drive="KeyQ" disabled>Turn left <kbd>Q</kbd></button>
+            <button class="secondary" type="button" data-drive="KeyW" disabled>Forward <kbd>W</kbd></button>
+            <button class="secondary" type="button" data-drive="KeyE" disabled>Turn right <kbd>E</kbd></button>
+            <button class="secondary" type="button" data-drive="KeyA" disabled>Step left <kbd>A</kbd></button>
+            <button class="secondary" type="button" data-drive="KeyS" disabled>Backward <kbd>S</kbd></button>
+            <button class="secondary" type="button" data-drive="KeyD" disabled>Step right <kbd>D</kbd></button>
+          </div>
+        </div>
       </section>
       <section class="card activity" aria-labelledby="activity-title">
         <div class="card-title"><h2 id="activity-title">Activity</h2></div>

@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "/assets/vendor/OrbitControls.js";
 import { STLLoader } from "/assets/vendor/STLLoader.js";
-import { createPosePreview } from "/static/pose-preview.js";
+import { createPosePreview } from "/static/pose-preview.js?v=2";
 
 function transform(object, position, [w, x, y, z]) {
   object.position.fromArray(position);
@@ -63,19 +63,20 @@ export async function createViewer(container, onStatusChange) {
 
     const robot = new THREE.Group();
     robot.rotation.x = -Math.PI / 2;
-    robot.add(makeBody(root, false));
+    const base = makeBody(root, false);
+    robot.add(base);
     scene.add(robot);
     if (joints.length !== 29 || joints.some(name => !pivots.has(name))) {
       throw new Error("G1 model does not match the DDS joint ordering");
     }
-    return { robot, rig: joints.map(name => pivots.get(name)) };
+    return { robot, base, rig: joints.map(name => pivots.get(name)) };
   }
 
-  const { robot, rig } = makeRobot(false);
+  const { robot, base, rig } = makeRobot(false);
   const ghost = makeRobot(true);
   ghost.robot.visible = false;
 
-  const grid = new THREE.GridHelper(12, 48, 0x34496a, 0x1d2c44);
+  const grid = new THREE.GridHelper(48, 192, 0x34496a, 0x1d2c44);
   grid.position.y = -0.012;
   scene.add(grid, new THREE.HemisphereLight(0xf0f6ff, 0x64758b, 2.2));
   const key = new THREE.DirectionalLight(0xffffff, 2.8);
@@ -153,6 +154,12 @@ export async function createViewer(container, onStatusChange) {
   let goal = null;
   let target = Array(joints.length).fill(0);
   let displayed = target.slice();
+  const basePosition = base.position.clone();
+  const baseRotation = base.quaternion.clone();
+  const travel = new THREE.Vector3();
+  const delta = new THREE.Vector3();
+  const renderedBase = base.position.clone();
+  let instantBase = false;
   let lastFrame = performance.now();
   function draw(now) {
     requestAnimationFrame(draw);
@@ -163,10 +170,21 @@ export async function createViewer(container, onStatusChange) {
       displayed[index] += (target[index] - displayed[index]) * step;
       pivot.quaternion.setFromAxisAngle(axis, displayed[index]);
     });
+    base.position.lerp(basePosition, instantBase ? 1 : step);
+    base.quaternion.slerp(baseRotation, instantBase ? 1 : step);
+    instantBase = false;
+    delta.subVectors(base.position, renderedBase).applyQuaternion(robot.quaternion);
+    delta.y = 0;
+    renderedBase.copy(base.position);
+    travel.add(delta);
+    camera.position.add(delta);
+    controls.target.add(delta);
     // Arm joints are the last entries of the pose. Hide the ghost once the arms have arrived.
     const first = joints.length - (goal?.length ?? 0);
     ghost.robot.visible = Boolean(goal?.some((angle, index) => Math.abs(angle - displayed[first + index]) > 0.08));
     if (ghost.robot.visible) {
+      ghost.base.position.copy(base.position);
+      ghost.base.quaternion.copy(base.quaternion);
       ghost.rig.forEach(({ pivot, axis }, index) => {
         pivot.quaternion.setFromAxisAngle(axis, index < first ? displayed[index] : goal[index - first]);
       });
@@ -177,14 +195,19 @@ export async function createViewer(container, onStatusChange) {
     } else {
       scene.updateMatrixWorld();
       camera.updateMatrixWorld();
-      preview(camera);
+      preview(camera, controls.target);
     }
   }
   requestAnimationFrame(draw);
 
   return {
     get status() { return status; },
-    resetCamera: () => controls.reset(),
+    resetCamera() {
+      controls.reset();
+      camera.position.add(travel);
+      controls.target.add(travel);
+      controls.update();
+    },
     highlight(kind, names) {
       glow[kind] = names;
       for (const [name, materials] of links) {
@@ -196,8 +219,14 @@ export async function createViewer(container, onStatusChange) {
         }
       }
     },
-    showPose(angles, immediate = false, armTarget = null) {
+    showPose(angles, immediate = false, armTarget = null, worldBase = null) {
       goal = armTarget;
+      if (worldBase) {
+        const [w, x, y, z] = worldBase.quaternion;
+        basePosition.fromArray(worldBase.position);
+        baseRotation.set(x, y, z, w).normalize();
+        instantBase ||= immediate;
+      }
       if (!angles || angles.length !== joints.length) return;
       target = angles;
       if (immediate) displayed = target.slice();
